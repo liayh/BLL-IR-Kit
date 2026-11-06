@@ -57,4 +57,4 @@ Invoke-Module 'Rapport' { Build-RapportAudit }
 Say ''
 Say ('TERMINE : score {0}/100 (note {1}) - {2} ecarts.' -f $script:Score, $script:Note, @($script:Checks | Where-Object { $_.Etat -eq 'ECART' }).Count) 'Green'
 Say ('Rapport : ' + (Join-Path $script:Out 'rapport_audit.html'))
-if (-not $SansMenu) { try { Start-Process (Join-Path $script:Out 'rapport_audit.html') } catch { }; Read-Host 'Entree pour fermer' | Out-Null }
+if (-not $SansMenu) { Open-Rapport 'rapport_audit.html'; Read-Host 'Entree pour fermer' | Out-Null }

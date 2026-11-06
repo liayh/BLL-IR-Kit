@@ -53,27 +53,40 @@ function Get-Snapshot {
     $s.partage_smb = @(Get-SmbShare | Where-Object { -not $_.Special } | ForEach-Object { $_.Name + ' | ' + $_.Path })
     $rdp = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections
     $s.rdp = @($(if ($rdp -and $rdp.fDenyTSConnections -eq 0) { 'RDP active' } else { 'RDP desactive' }))
+    # protections coupees (geste classique d'un attaquant avant chiffrement)
+    $prot = @()
+    try { $mp = Get-MpComputerStatus -ErrorAction Stop
+        $prot += ('Defender protection temps reel : ' + $(if ($mp.RealTimeProtectionEnabled) { 'active' } else { 'DESACTIVEE' }))
+        $prot += ('Defender protection anti-falsification : ' + $(if ($mp.IsTamperProtected) { 'active' } else { 'DESACTIVEE' })) } catch { }
+    try { Get-NetFirewallProfile -ErrorAction Stop | ForEach-Object { $prot += ('Pare-feu profil ' + $_.Name + ' : ' + $(if ($_.Enabled) { 'active' } else { 'DESACTIVE' })) } } catch { }
+    $s.protection = @($prot)
     return $s
 }
 
-$sevMap = @{ administrateur = 'ELEVE'; utilisateur_actif = 'ELEVE'; outil_acces_distant = 'ELEVE'; exclusion_defender = 'ELEVE'; portproxy = 'ELEVE'; hosts = 'ELEVE'; rdp = 'ELEVE'; service = 'MOYEN'; tache = 'MOYEN'; demarrage_registre = 'MOYEN'; dossier_demarrage = 'MOYEN'; pare_feu_entrant_programme = 'MOYEN'; partage_smb = 'MOYEN'; port_en_ecoute = 'FAIBLE'; logiciel = 'FAIBLE' }
-$label = @{ administrateur = 'Nouvel administrateur local'; utilisateur_actif = 'Nouveau compte local actif'; outil_acces_distant = 'Outil d''acces distant / d''attaque detecte'; exclusion_defender = 'Nouvelle exclusion Defender'; portproxy = 'Redirection de port (portproxy)'; hosts = 'Modification du fichier hosts'; rdp = 'Etat RDP modifie'; service = 'Nouveau service'; tache = 'Nouvelle tache planifiee'; demarrage_registre = 'Nouveau programme au demarrage (registre)'; dossier_demarrage = 'Nouveau fichier dans un dossier Demarrage'; pare_feu_entrant_programme = 'Nouvelle regle de pare-feu entrante'; partage_smb = 'Nouveau partage reseau'; port_en_ecoute = 'Nouveau port en ecoute'; logiciel = 'Nouveau logiciel installe' }
+$sevMap = @{ protection = 'ELEVE'; administrateur = 'ELEVE'; utilisateur_actif = 'ELEVE'; outil_acces_distant = 'ELEVE'; exclusion_defender = 'ELEVE'; portproxy = 'ELEVE'; hosts = 'ELEVE'; rdp = 'ELEVE'; service = 'MOYEN'; tache = 'MOYEN'; demarrage_registre = 'MOYEN'; dossier_demarrage = 'MOYEN'; pare_feu_entrant_programme = 'MOYEN'; partage_smb = 'MOYEN'; port_en_ecoute = 'FAIBLE'; logiciel = 'FAIBLE' }
+$label = @{ protection = 'Protection coupee'; administrateur = 'Nouvel administrateur local'; utilisateur_actif = 'Nouveau compte local actif'; outil_acces_distant = 'Outil d''acces distant / d''attaque detecte'; exclusion_defender = 'Nouvelle exclusion Defender'; portproxy = 'Redirection de port (portproxy)'; hosts = 'Modification du fichier hosts'; rdp = 'Etat RDP modifie'; service = 'Nouveau service'; tache = 'Nouvelle tache planifiee'; demarrage_registre = 'Nouveau programme au demarrage (registre)'; dossier_demarrage = 'Nouveau fichier dans un dossier Demarrage'; pare_feu_entrant_programme = 'Nouvelle regle de pare-feu entrante'; partage_smb = 'Nouveau partage reseau'; port_en_ecoute = 'Nouveau port en ecoute'; logiciel = 'Nouveau logiciel installe' }
 
 function Send-Alert {
+    # renvoie $true si l'alerte est partie par au moins un canal (ou si aucun canal n'est configure)
     param([string]$Subject, [string]$Body)
     Log ('ALERTE : ' + $Subject)
+    $canaux = 0; $ok = 0
     try { if (-not [System.Diagnostics.EventLog]::SourceExists('BLL-Surveillance')) { New-EventLog -LogName Application -Source 'BLL-Surveillance' }; Write-EventLog -LogName Application -Source 'BLL-Surveillance' -EntryType Warning -EventId 4100 -Message ($Body.Substring(0, [Math]::Min($Body.Length, 30000))) } catch { }
-    if (-not $cfg) { return }
+    if (-not $cfg) { return $true }
     foreach ($u in @($cfg.Webhook)) {
         if (-not $u) { continue }
+        $canaux++
+        if ($u -notmatch '^https://') { Log ('Webhook refuse (HTTPS obligatoire) : ' + $u); continue }
         try {
             $js = (@{ text = ($Subject + "`n" + $Body); content = ($Subject + "`n" + $Body) } | ConvertTo-Json)
             [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
             Invoke-RestMethod -Uri $u -Method Post -Body ([Text.Encoding]::UTF8.GetBytes($js)) -ContentType 'application/json; charset=utf-8' -TimeoutSec 20 | Out-Null
+            $ok++
         } catch { Log ('Webhook en echec : ' + $_.Exception.Message) }
     }
     $m = $cfg.Email
     if ($m -and $m.Smtp -and $m.To) {
+        $canaux++
         try {
             $p = @{ SmtpServer = $m.Smtp; Port = [int]$m.Port; From = $m.From; To = @($m.To); Subject = $Subject; Body = $Body; Encoding = [Text.Encoding]::UTF8 }
             if ($m.Ssl) { $p.UseSsl = $true }
@@ -83,19 +96,26 @@ function Send-Alert {
                 $p.Credential = New-Object Management.Automation.PSCredential($m.User, (ConvertTo-SecureString $plain -AsPlainText -Force))
             }
             [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-            Send-MailMessage @p
+            Send-MailMessage @p -ErrorAction Stop
+            $ok++
         } catch { Log ('Mail en echec : ' + $_.Exception.Message) }
     }
+    return (($canaux -eq 0) -or ($ok -gt 0))
 }
 
 # ------------------------------------------------------------------ test
-if ($Test) { Send-Alert ('[BLL] TEST de surveillance - ' + $site) ('Ceci est un message de test envoye le ' + $now.ToString('yyyy-MM-dd HH:mm') + ' UTC.'); Write-Host 'Alerte de test envoyee (voir journal_surveillance.log en cas de probleme).'; exit 0 }
+if ($Test) {
+    $r = Send-Alert ('[BLL] TEST de surveillance - ' + $site) ('Ceci est un message de test envoye le ' + $now.ToString('yyyy-MM-dd HH:mm') + ' UTC.')
+    if ($r) { Write-Host 'Alerte de test envoyee. Verifiez sa reception.' -ForegroundColor Green; exit 0 }
+    Write-Host ('ECHEC de l''envoi de l''alerte de test : voir ' + $logPath) -ForegroundColor Red; exit 3
+}
 
 $snap = Get-Snapshot
 $state = $null
 if (Test-Path -LiteralPath $statePath) { try { $state = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { } }
 
 $tvFile = 'C:\Program Files\TeamViewer\Connections_incoming.txt'
+if (-not (Test-Path -LiteralPath $tvFile)) { $tvFile = 'C:\Program Files (x86)\TeamViewer\Connections_incoming.txt' }
 $tvLines = 0; if (Test-Path -LiteralPath $tvFile) { $tvLines = @(Get-Content -LiteralPath $tvFile).Count }
 
 # ------------------------------------------------------------------ init
@@ -113,9 +133,11 @@ function Is-Allowed { param([string]$t) foreach ($rx in $allow) { try { if ($t -
 
 # 1. changements de configuration
 foreach ($cat in $snap.Keys) {
-    $baseItems = @(); if ($state.Base.PSObject.Properties.Name -contains $cat) { $baseItems = @($state.Base.$cat) }
+    if ($state.Base.PSObject.Properties.Name -notcontains $cat) { continue }   # nouvelle categorie (mise a jour) : apprise sans alerte
+    $baseItems = @($state.Base.$cat)
     $cur = @($snap[$cat])
     $new = @($cur | Where-Object { $_ -and ($baseItems -notcontains $_) -and -not (Is-Allowed $_) })
+    if ($cat -eq 'protection') { $new = @($new | Where-Object { $_ -match 'DESACTIVE' }) }
     if ($cat -eq 'rdp' -or $cat -eq 'hosts') { if ($new.Count -gt 0) { $alerts.Add([pscustomobject]@{ Sev = $sevMap[$cat]; Txt = ($label[$cat] + ' : ' + ($new -join ' ; ')) }) } ; continue }
     foreach ($n in ($new | Select-Object -First 15)) { $alerts.Add([pscustomobject]@{ Sev = $sevMap[$cat]; Txt = ($label[$cat] + ' : ' + $n) }) }
     if ($new.Count -gt 15) { $alerts.Add([pscustomobject]@{ Sev = 'FAIBLE'; Txt = ($label[$cat] + ' : ' + ($new.Count - 15) + ' autres') }) }
@@ -160,13 +182,14 @@ if ($tvLines -gt [int]$state.TvLignes) {
 
 # 4. envoi
 $sevOrder = @{ 'ELEVE' = 0; 'MOYEN' = 1; 'FAIBLE' = 2 }
+$delivered = $true
 $sorted = @($alerts | Sort-Object @{ Expression = { $sevOrder[$_.Sev] } })
 $needSend = @($sorted | Where-Object { $_.Sev -ne 'FAIBLE' }).Count -gt 0
 if ($sorted.Count -gt 0) {
     $body = ('Site : {0}' + "`n" + 'Date : {1} UTC' + "`n`n") -f $site, $now.ToString('yyyy-MM-dd HH:mm')
     foreach ($a in $sorted) { $body += ('[{0}] {1}' + "`n") -f $a.Sev, $a.Txt }
     $body += "`nSi ces changements sont normaux : ajoutez un motif dans autorises.txt ou relancez Surveiller.ps1 -Init."
-    if ($needSend) { $nE = @($sorted | Where-Object { $_.Sev -eq 'ELEVE' }).Count; Send-Alert ('[BLL] ALERTE securite - {0} ({1} critiques)' -f $site, $nE) $body } else { Log ('Changements mineurs : ' + (($sorted | ForEach-Object { $_.Txt }) -join ' ; ')) }
+    if ($needSend) { $nE = @($sorted | Where-Object { $_.Sev -eq 'ELEVE' }).Count; $delivered = Send-Alert ('[BLL] ALERTE securite - {0} ({1} critiques)' -f $site, $nE) $body } else { Log ('Changements mineurs : ' + (($sorted | ForEach-Object { $_.Txt }) -join ' ; ')) }
 }
 
 # 5. signe de vie hebdomadaire (l'absence de message signale une panne de surveillance)
@@ -174,11 +197,16 @@ $hbDays = 7; if ($cfg -and $cfg.HeartbeatJours -ne $null) { $hbDays = [int]$cfg.
 $lastHb = $now.AddDays(-365); try { $lastHb = ([datetime]$state.DernierRythme).ToUniversalTime() } catch { }
 $hb = $state.DernierRythme
 if ($hbDays -gt 0 -and ($now - $lastHb).TotalDays -ge $hbDays) {
-    Send-Alert ('[BLL] Surveillance active - ' + $site) ('Surveillance en fonctionnement. Dernier controle : ' + $now.ToString('yyyy-MM-dd HH:mm') + ' UTC. Changements ces derniers jours : voir journal_surveillance.log.')
+    $null = Send-Alert ('[BLL] Surveillance active - ' + $site) ('Surveillance en fonctionnement. Dernier controle : ' + $now.ToString('yyyy-MM-dd HH:mm') + ' UTC. Changements ces derniers jours : voir journal_surveillance.log.')
     $hb = $now.ToString('o')
 }
 
 # 6. nouvelle reference = etat actuel (une alerte n'est envoyee qu'une fois)
-$o = [ordered]@{ Base = $snap; DerniereExecutionUtc = $now.ToString('o'); TvLignes = $tvLines; DernierRythme = $hb }
+#    si l'alerte n'a pu partir par aucun canal, on garde l'ancienne reference : elle sera renvoyee au prochain controle
+if ($delivered) { $o = [ordered]@{ Base = $snap; DerniereExecutionUtc = $now.ToString('o'); TvLignes = $tvLines; DernierRythme = $hb } }
+else {
+    Log 'Alerte NON transmise (webhook/mail en echec) : elle sera renvoyee au prochain controle.'
+    $o = [ordered]@{ Base = $state.Base; DerniereExecutionUtc = [string]$state.DerniereExecutionUtc; TvLignes = [int]$state.TvLignes; DernierRythme = $hb }
+}
 ($o | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $statePath -Encoding UTF8
 Log ('Controle termine : {0} changement(s).' -f $sorted.Count)

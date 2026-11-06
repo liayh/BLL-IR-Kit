@@ -12,7 +12,12 @@ Write-Host 'Ce poste doit etre considere comme SAIN : son etat actuel devient la
 if ((Read-Host 'Taper OUI pour continuer') -ne 'OUI') { exit 0 }
 
 $site = Read-Host 'Nom de la pharmacie / du site (ex. Pharmacie X Angers)'
-$hook = Read-Host 'URL de webhook pour les alertes (Teams, Slack, Discord, ntfy) - vide pour ignorer'
+while ($true) {
+    $hook = (Read-Host 'URL de webhook pour les alertes (Teams, Slack, Discord, ntfy) - vide pour ignorer').Trim()
+    if (-not $hook -or $hook -match '^https://[^\s]+$') { break }
+    Write-Host 'Adresse refusee : elle doit commencer par https:// (les alertes contiennent des noms de postes et de comptes).' -ForegroundColor Yellow
+}
+if ($hook -match '(?i)ntfy') { Write-Host 'ntfy : un sujet public est lisible par quiconque connait son nom. Utilisez un nom long et aleatoire ou un serveur protege par mot de passe.' -ForegroundColor Yellow }
 $mail = $null
 if ((Read-Host 'Configurer aussi l''envoi par mail ? (O/N)') -match '^[oOyY]') {
     $smtp = Read-Host 'Serveur SMTP (ex. smtp.office365.com)'; $port = Read-Host 'Port (ex. 587)'
@@ -27,12 +32,17 @@ if ((Read-Host 'Configurer aussi l''envoi par mail ? (O/N)') -match '^[oOyY]') {
     $mail = [ordered]@{ Smtp = $smtp; Port = [int]$port; Ssl = $true; From = $from; To = @($to -split '\s*,\s*'); User = $user; PassProtegee = $prot }
 }
 New-Item -ItemType Directory -Path $dest -Force | Out-Null
+# Le script tourne en SYSTEM : personne d'autre que SYSTEM et les administrateurs ne doit pouvoir lire ou modifier ce dossier
+# (sinon un simple utilisateur pourrait remplacer le script et prendre le controle du poste, ou lire le mot de passe SMTP).
+# SID plutot que noms de groupes : fonctionne sur un Windows en francais.
+$bll = Split-Path -Parent $dest
+$null = & icacls.exe $bll /setowner '*S-1-5-32-544' /T /C /Q 2>&1
+$null = & icacls.exe $bll /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /T /C /Q 2>&1
+if ($LASTEXITCODE -ne 0) { Write-Host ('ERREUR : impossible de proteger ' + $bll + '. Installation annulee.') -ForegroundColor Red; Read-Host 'Entree pour fermer' | Out-Null; exit 1 }
 Copy-Item -LiteralPath (Join-Path $kit 'Surveillance\Surveiller.ps1') -Destination $dest -Force
 if (Test-Path (Join-Path $kit 'config\autorises.txt')) { Copy-Item -LiteralPath (Join-Path $kit 'config\autorises.txt') -Destination (Join-Path $dest 'autorises.txt') -Force } else { Set-Content (Join-Path $dest 'autorises.txt') '# motifs autorises' }
 $cfg = [ordered]@{ Site = $site; Webhook = @($hook | Where-Object { $_ }); Email = $mail; HeartbeatJours = 7 }
 ($cfg | ConvertTo-Json -Depth 5) | Set-Content -LiteralPath (Join-Path $dest 'alerte.json') -Encoding UTF8
-# seuls SYSTEM et les administrateurs peuvent modifier ce dossier
-& icacls.exe $dest /inheritance:r /grant:r 'SYSTEM:(OI)(CI)F' 'BUILTIN\Administrators:(OI)(CI)F' 'BUILTIN\Users:(OI)(CI)RX' | Out-Null
 try { if (-not [System.Diagnostics.EventLog]::SourceExists('BLL-Surveillance')) { New-EventLog -LogName Application -Source 'BLL-Surveillance' } } catch { }
 
 $script = Join-Path $dest 'Surveiller.ps1'
@@ -51,5 +61,5 @@ Write-Host 'Envoi d''une alerte de test...'
 Write-Host ''
 Write-Host 'Surveillance installee : controle toutes les 4 h et au demarrage.' -ForegroundColor Green
 Write-Host ('Dossier : ' + $dest + ' (journal_surveillance.log, autorises.txt, alerte.json)')
-Write-Host 'Apres un changement legitime : powershell -File "' $script '" -Init'
+Write-Host ('Apres un changement legitime (en administrateur) : powershell -ExecutionPolicy Bypass -File "' + $script + '" -Init')
 Read-Host 'Entree pour fermer' | Out-Null

@@ -2,7 +2,9 @@ BLL IR-Kit - collecte de preuves portable (aucune installation)
 ================================================================
 
 PRINCIPE
-  Copier le dossier sur une cle USB. Sur le poste a examiner : double-clic sur Lancer.bat
+  BLL-IR-Kit.bat ouvre un menu unique : 1 collecte, 2 audit du poste, 3 audit Microsoft 365,
+  4/5 installer/retirer la surveillance. Les anciens lanceurs (Lancer*.bat) fonctionnent toujours.
+  Copier le dossier sur une cle USB. Sur le poste a examiner : double-clic sur BLL-IR-Kit.bat, choix 1
   (accepter l'elevation administrateur). Tout est ecrit a cote de l'outil, dans :
      Resultats\<POSTE>_<date>\
   Aucune installation ni modification permanente pour la collecte : l'outil lit le poste et ecrit les
@@ -30,9 +32,26 @@ RESULTATS
   manifeste_des_copies.csv, SHA256SUMS.txt, FICHE_DE_COLLECTE.txt   integrite et chaine de possession
   ..._SANS_SENSIBLE.zip archive transmissible (sans raw_SENSIBLE)
 
+  FIN D'ANALYSE (collecte, audit poste, audit M365) : le rapport est produit, puis l'outil propose de
+  l'enregistrer AVANT de l'ouvrir :  1 = archive .zip transmissible, 2 = dossier complet, Entree = rien.
+  La copie est verifiee (empreintes SHA256) ; un ecart est signale en rouge.
+
+SECURITE : L'OUTIL N'OUVRE AUCUN ACCES DEPUIS L'EXTERIEUR
+  - Aucun port en ecoute, aucune regle de pare-feu, aucun compte, aucun service d'acces distant n'est cree.
+  - Connexions uniquement SORTANTES : Microsoft Graph / Exchange (audit M365, depuis le poste du technicien)
+    et webhook/mail d'alerte (surveillance, HTTPS obligatoire).
+  - raw_SENSIBLE (cles AnyDesk : permettraient d'usurper l'identite AnyDesk du poste) est reserve a SYSTEM et
+    aux administrateurs des sa creation. Sur une cle USB FAT32/exFAT ces droits n'existent pas : l'outil
+    l'indique ; gardez la cle sous clef et effacez raw_SENSIBLE des qu'il n'est plus utile.
+  - Dossier de surveillance C:\ProgramData\BLL : modifiable et lisible uniquement par SYSTEM et les administrateurs
+    (un utilisateur ne peut ni remplacer le script execute en SYSTEM, ni lire le mot de passe SMTP).
+  - Audit reseau local : UPnP interroge uniquement l'equipement local qui repond, jamais une adresse externe.
+
 CONFIGURATION (dossier config\)
   ioc.txt            indicateurs a retrouver partout (ID AnyDesk, IP, empreintes)  - ajouter les votres
   autorises.txt      expressions regulieres des acces distants legitimes (passent en INFO)
+                     sans effet sur : indicateurs connus, notes de rancon, persistance WMI/Winlogon/IFEO/AppInit,
+                     sessions RDP (ces constats ne peuvent jamais etre masques)
   mots_cles_note.txt mots recherches dans les notes de rancon
 
 LIMITES (a connaitre)
@@ -47,7 +66,7 @@ LIMITES (a connaitre)
 AUDITS ET SURVEILLANCE (v1.1)
 ==============================================================================
 
-1) Lancer-Audit.bat  - AUDIT D'UN POSTE (lecture seule, administrateur) -> rapport_audit.html + score /100
+1) BLL-IR-Kit.bat choix 2 (ou Lancer-Audit.bat)  - AUDIT D'UN POSTE (lecture seule, administrateur) -> rapport_audit.html + score /100
    - Durcissement Windows : version supportee, SMBv1, RDP/NLA, BitLocker, Defender (+exclusions), pare-feu, UAC,
      WDigest/LSASS/NTLM, PowerShell v2, journalisation, comptes locaux (admins, invite, sans mot de passe), LAPS,
      outils d'acces distant non declares.
@@ -61,7 +80,7 @@ AUDITS ET SURVEILLANCE (v1.1)
      serveur DHCP pirate, UPnP et redirections de ports de la box. A lancer depuis un poste de l'officine.
    Option : Audit-Kit.ps1 -Modules Sauvegardes,Reseau -Rapide
 
-2) Lancer-M365.bat  - AUDIT MICROSOFT 365 (lecture seule, depuis VOTRE poste, connexion admin du tenant)
+2) BLL-IR-Kit.bat choix 3 (ou Lancer-M365.bat)  - AUDIT MICROSOFT 365 (lecture seule, depuis VOTRE poste, connexion admin du tenant)
    MFA (Security Defaults / acces conditionnel / par utilisateur), administrateurs generaux, comptes inactifs et
    invites, applications tierces consenties, connexions hors de France, authentification heritee, redirections de
    messagerie, regles de boite suspectes, regles de transport, POP/IMAP, SMTP AUTH.
@@ -73,7 +92,9 @@ AUDITS ET SURVEILLANCE (v1.1)
    - Alerte (webhook Teams/Slack/Discord/ntfy, mail, journal d'evenements Windows) si : nouvel administrateur ou
      compte, nouvel outil d'acces distant, nouveau service/tache/demarrage, nouvelle regle de pare-feu entrante,
      nouveau partage, exclusion Defender, portproxy, modification du fichier hosts, RDP active, journal efface,
-     session RDP depuis une IP publique, detection Defender, connexion AnyDesk ou TeamViewer ENTRANTE.
+     session RDP depuis une IP publique, detection Defender, connexion AnyDesk ou TeamViewer ENTRANTE,
+     protection temps reel / anti-falsification Defender ou pare-feu DESACTIVES.
+   - Si l'alerte ne peut pas partir (Internet coupe), elle est renvoyee au controle suivant.
    - Signe de vie hebdomadaire : l'absence de message signale une panne de surveillance.
    - Apres un changement legitime : Surveiller.ps1 -Init, ou ajouter un motif dans autorises.txt.
    - Retrait : Outils\Desinstaller-Surveillance.ps1.

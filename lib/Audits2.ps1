@@ -191,7 +191,9 @@ function Get-UpnpMappings {
         $svc = $x.SelectNodes('//d:service', $ns) | Where-Object { $_.serviceType -match 'WANIPConnection|WANPPPConnection' } | Select-Object -First 1
         if (-not $svc) { return $maps }
         $uri = New-Object Uri($Location)
-        $ctl = (New-Object Uri($uri, $svc.controlURL)).AbsoluteUri
+        $cu = New-Object Uri($uri, $svc.controlURL)
+        if ($cu.Host -ne $uri.Host) { return $maps }
+        $ctl = $cu.AbsoluteUri
         for ($i = 0; $i -lt 60; $i++) {
             $body = '<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body><u:GetGenericPortMappingEntry xmlns:u="' + $svc.serviceType + '"><NewPortMappingIndex>' + $i + '</NewPortMappingIndex></u:GetGenericPortMappingEntry></s:Body></s:Envelope>'
             try {
@@ -269,7 +271,12 @@ function Mod-ReseauLan {
     # UPnP et redirections de ports
     $up = @(Get-UpnpInfo)
     $maps = New-Object System.Collections.Generic.List[object]
-    foreach ($g in $up) { foreach ($m in (Get-UpnpMappings $g.Location)) { $maps.Add($m) } }
+    # on n'interroge que l'equipement qui a repondu, et seulement s'il est sur le reseau local (aucune URL externe suivie)
+    foreach ($g in $up) {
+        $h = ''; try { $h = ([Uri]$g.Location).Host } catch { }
+        if ($h -eq $g.Source -and $h -match '^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)') { foreach ($m in (Get-UpnpMappings $g.Location)) { $maps.Add($m) } }
+        else { Say ('   UPnP ignore (adresse hors reseau local ou incoherente) : ' + $g.Location) 'Yellow' }
+    }
     $null = Save-Csv $maps 'redirections_upnp.csv' '05_reseau_local'
     Add-Check 'Reseau local' 'UPnP desactive sur la box' ($up.Count -eq 0) ($up | ForEach-Object { $_.Source }) 'Desactiver UPnP dans la box : il permet a un logiciel de rediriger un port vers Internet sans controle.' 'MOYEN'
     if ($up.Count -gt 0) { Add-Check 'Reseau local' 'Aucune redirection de port UPnP active' ($maps.Count -eq 0) (($maps | ForEach-Object { '{0}/{1} -> {2}:{3} ({4})' -f $_.PortExterne, $_.Protocole, $_.VersIp, $_.PortInterne, $_.Description }) -join ' ; ') 'Supprimer les redirections inutiles ; une camera ou un NVR accessible depuis Internet est une cible prioritaire.' 'ELEVE' }

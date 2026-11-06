@@ -1,6 +1,6 @@
 ﻿# Core.ps1 - etat global, journalisation, resultats, copie de preuves (empreintes + dates d'origine)
 
-$script:KitVersion = '1.1.0'
+$script:KitVersion = '1.2.0'
 $script:Findings   = New-Object System.Collections.Generic.List[object]
 $script:Errors     = New-Object System.Collections.Generic.List[string]
 $script:Manifest   = New-Object System.Collections.Generic.List[object]
@@ -8,6 +8,7 @@ $script:Allow      = @()
 $script:SigCache   = @{}
 $script:Timings    = New-Object System.Collections.Generic.List[object]
 $script:Delim      = ';'
+$script:NonAutorisables = '^(Indicateur connu|Note de rancon probable|Persistance WMI|Winlogon|Detournement IFEO|AppInit_DLLs|Connexion RDP)$'
 
 # Dossiers ou un executable d'acces distant n'a rien a faire
 $script:RiskDirRx = '(?i)\\(temp|tmp)\\|\\appdata\\local\\temp|\\users\\public\\|\\downloads\\|\\desktop\\|\\documents\\|\\\$recycle|\\windows\\tasks|\\windows\\temp'
@@ -44,7 +45,10 @@ function Add-Finding {
     )
     $sev = $Severite
     $hay = '{0} {1} {2} {3}' -f $Categorie, $Detail, $Chemin, $Info
-    foreach ($rx in $script:Allow) {
+    # constats critiques : jamais masques par config\autorises.txt
+    $allowList = $script:Allow
+    if ($Categorie -match $script:NonAutorisables) { $allowList = @() }
+    foreach ($rx in $allowList) {
         try { if ($hay -match $rx) { $sev = 'INFO'; $Info = ($Info + ' [AUTORISE: ' + $rx + ']').Trim(); break } } catch { }
     }
     $script:Findings.Add([pscustomobject]@{ Severite = $sev; Categorie = $Categorie; Detail = $Detail; Chemin = $Chemin; Info = $Info })
@@ -204,4 +208,115 @@ function Copy-Evidence {
         $script:Manifest.Add([pscustomobject]$row)
     }
     return $nb
+}
+
+# ---------------------------------------------------------------------------
+# Protection des donnees sensibles : seuls SYSTEM et les administrateurs y accedent
+# ---------------------------------------------------------------------------
+function Protect-Folder {
+    param([string]$Path)
+    try {
+        $full = (Get-Item -LiteralPath $Path -Force).FullName
+        $root = [IO.Path]::GetPathRoot($full)
+        if ($root -like '\\*') { Say ('ATTENTION : ' + $full + ' est sur un partage reseau, droits non verifiables.') 'Yellow'; return $false }
+        $fmt = ([IO.DriveInfo]$root).DriveFormat
+        if ($fmt -notin 'NTFS', 'ReFS') {
+            Say ('ATTENTION : le support ' + $root + ' est en ' + $fmt + ' (pas de droits d''acces) : raw_SENSIBLE est lisible par quiconque a la cle. Gardez-la sous clef.') 'Yellow'
+            return $false
+        }
+        # SID plutot que noms : fonctionne sur un Windows en francais
+        $null = & icacls.exe $full /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /T /C /Q 2>&1
+        if ($LASTEXITCODE -ne 0) { Say ('ATTENTION : droits non appliques sur ' + $full) 'Yellow'; return $false }
+        return $true
+    } catch {
+        Say ('ATTENTION : protection impossible de ' + $Path + ' : ' + $_.Exception.Message) 'Yellow'
+        return $false
+    }
+}
+
+# ---------------------------------------------------------------------------
+# En fin d'analyse : proposer d'enregistrer les resultats AVANT d'ouvrir le rapport
+# ---------------------------------------------------------------------------
+function Save-Resultats {
+    param([Parameter(Mandatory)][string]$Rapport)
+    $src = $script:Out.TrimEnd('\', '/')
+    $zip = $src + '_SANS_SENSIBLE.zip'
+    $hasZip = Test-Path -LiteralPath $zip
+    $sens = Join-Path $src 'raw_SENSIBLE'
+    $hasSens = (Test-Path -LiteralPath $sens) -and @(Get-ChildItem -LiteralPath $sens -Recurse -File -Force -ErrorAction SilentlyContinue).Count -gt 0
+    $stampName = Split-Path -Leaf $src
+
+    while ($true) {
+        Write-Host ''
+        Write-Host ' Le rapport est pret. Enregistrer une copie avant de l''ouvrir ?' -ForegroundColor Cyan
+        if ($hasZip) { Write-Host ' 1) Archive transmissible (.zip, sans les donnees sensibles)' }
+        if ($hasSens) { Write-Host ' 2) Dossier complet (AVEC raw_SENSIBLE : cles AnyDesk, historiques)' }
+        else { Write-Host ' 2) Dossier complet des resultats' }
+        Write-Host ' Entree) Ne pas enregistrer, ouvrir le rapport'
+        $c = Read-Host ' Choix'
+        if (-not $c) { return }
+        if (($c -eq '1' -and $hasZip) -or $c -eq '2') { break }
+        Write-Host ' Choix invalide.' -ForegroundColor Yellow
+    }
+
+    $owner = $null
+    try {
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+        $owner = New-Object System.Windows.Forms.Form -Property @{ TopMost = $true; ShowInTaskbar = $false }
+    } catch { }
+    try {
+        if ($c -eq '1') {
+            $dest = $null
+            if ($owner) {
+                $dlg = New-Object System.Windows.Forms.SaveFileDialog
+                $dlg.Title = 'Enregistrer l''archive des resultats'
+                $dlg.Filter = 'Archive ZIP (*.zip)|*.zip'
+                $dlg.FileName = Split-Path -Leaf $zip
+                $dlg.OverwritePrompt = $true
+                if ($dlg.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) { $dest = $dlg.FileName }
+            } else { $dest = Read-Host ' Chemin complet du fichier .zip de destination' }
+            if (-not $dest) { Say 'Enregistrement annule.' 'Yellow'; return }
+            Copy-Item -LiteralPath $zip -Destination $dest -Force -ErrorAction Stop
+            if ((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash -eq (Get-FileHash -LiteralPath $dest -Algorithm SHA256).Hash) {
+                Say ('Archive enregistree, empreinte SHA256 verifiee : ' + $dest) 'Green'
+            } else { Say ('ERREUR : la copie differe de l''original : ' + $dest) 'Red' }
+        } else {
+            $parent = $null
+            if ($owner) {
+                $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
+                $dlg.Description = 'Dossier ou enregistrer ' + $stampName
+                $dlg.ShowNewFolderButton = $true
+                if ($dlg.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) { $parent = $dlg.SelectedPath }
+            } else { $parent = Read-Host ' Dossier de destination' }
+            if (-not $parent) { Say 'Enregistrement annule.' 'Yellow'; return }
+            $dest = Join-Path $parent $stampName
+            if ($dest.TrimEnd('\') -eq $src -or $dest.StartsWith($src + '\', [StringComparison]::OrdinalIgnoreCase)) { Say 'Destination invalide (dossier des resultats lui-meme).' 'Red'; return }
+            if (Test-Path -LiteralPath $dest) { Say ('Destination deja existante, rien n''est ecrase : ' + $dest) 'Red'; return }
+            Copy-Item -LiteralPath $src -Destination $dest -Recurse -Force -ErrorAction Stop
+            if ($hasZip) { Copy-Item -LiteralPath $zip -Destination $parent -Force }
+            if ($hasSens) { $null = Protect-Folder (Join-Path $dest 'raw_SENSIBLE') }
+            # verification fichier par fichier
+            $bad = 0; $n = 0
+            foreach ($f in (Get-ChildItem -LiteralPath $src -Recurse -File -Force)) {
+                $rel = $f.FullName.Substring($src.Length)
+                $g = Join-Path $dest $rel.TrimStart('\')
+                $n++
+                if (-not (Test-Path -LiteralPath $g) -or (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $g -Algorithm SHA256).Hash) { $bad++ }
+            }
+            if ($bad -eq 0) { Say ('Resultats enregistres et verifies (' + $n + ' fichiers) : ' + $dest) 'Green' }
+            else { Say ('ERREUR : ' + $bad + ' fichier(s) sur ' + $n + ' manquants ou differents dans ' + $dest) 'Red' }
+            if ($hasSens) { Say 'Cette copie contient raw_SENSIBLE : ne la transmettez a personne.' 'Yellow' }
+        }
+    } catch {
+        Say ('ERREUR d''enregistrement : ' + $_.Exception.Message) 'Red'
+    } finally { if ($owner) { $owner.Dispose() } }
+}
+
+function Open-Rapport {
+    # enregistrement propose, puis ouverture du rapport
+    param([Parameter(Mandatory)][string]$Rapport)
+    $p = Join-Path $script:Out $Rapport
+    if (-not (Test-Path -LiteralPath $p)) { Say ('ERREUR : rapport introuvable : ' + $p) 'Red'; return }
+    Save-Resultats -Rapport $Rapport
+    try { Start-Process -FilePath $p } catch { Say ('Ouvrez le rapport manuellement : ' + $p) 'Yellow' }
 }

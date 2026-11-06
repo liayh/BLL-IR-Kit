@@ -115,16 +115,23 @@ function Close-Collecte {
         if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
         $za = [System.IO.Compression.ZipFile]::Open($zip, 'Create')
         $baseLen = $script:Out.TrimEnd('\', '/').Length + 1
-        Get-ChildItem -LiteralPath $script:Out -Recurse -File -Force | Where-Object { $_.FullName -notmatch '[\\/]raw_SENSIBLE[\\/]' -and $_.Name -ne 'collecte.log' } | ForEach-Object {
-            try {
-                $entry = $_.FullName.Substring($baseLen) -replace '\\', '/'
-                $in = New-Object IO.FileStream($_.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]'ReadWrite,Delete'))
-                $e = $za.CreateEntry($entry, [System.IO.Compression.CompressionLevel]::Optimal)
-                $e.LastWriteTime = $_.LastWriteTime
-                $o = $e.Open(); $in.CopyTo($o); $o.Dispose(); $in.Dispose()
-            } catch { }
-        }
-        $za.Dispose()
-        Say ('   Archive : ' + $zip)
+        $fails = 0
+        try {
+            Get-ChildItem -LiteralPath $script:Out -Recurse -File -Force | Where-Object { $_.FullName -notmatch '[\\/]raw_SENSIBLE[\\/]' -and $_.Name -ne 'collecte.log' } | ForEach-Object {
+                $file = $_; $in = $null; $o = $null
+                try {
+                    $entry = $file.FullName.Substring($baseLen) -replace '\\', '/'
+                    $in = New-Object IO.FileStream($file.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]'ReadWrite,Delete'))
+                    $e = $za.CreateEntry($entry, [System.IO.Compression.CompressionLevel]::Optimal)
+                    $e.LastWriteTime = $file.LastWriteTime
+                    $o = $e.Open(); $in.CopyTo($o)
+                } catch {
+                    $fails++
+                    Say ('   Non archive : ' + $file.FullName + ' (' + $_.Exception.Message + ')') 'Yellow'
+                } finally { if ($o) { $o.Dispose() }; if ($in) { $in.Dispose() } }
+            }
+        } finally { $za.Dispose() }
+        if ($fails -gt 0) { Say ('   ATTENTION : archive INCOMPLETE, ' + $fails + ' fichier(s) manquant(s) : ' + $zip) 'Red' }
+        else { Say ('   Archive complete : ' + $zip) }
     } catch { Say ('   Archive non creee : ' + $_.Exception.Message) 'Yellow' }
 }

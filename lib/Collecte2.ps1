@@ -146,15 +146,20 @@ function Mod-Journaux {
         'Microsoft-Windows-WinRM/Operational' = 91, 168
         'Microsoft-Windows-SMBServer/Security' = 551, 1006
     }
+    # regles par journal : un meme numero d'evenement n'a pas le meme sens d'un journal a l'autre
+    $lSec = 'Security'; $lSys = 'System'; $lDef = 'Microsoft-Windows-Windows Defender/Operational'
     $rules = @{
-        '1102' = @('ELEVE', 'Journal Securite efface'); '104' = @('ELEVE', 'Journal efface'); '4720' = @('ELEVE', 'Compte cree')
-        '4722' = @('MOYEN', 'Compte active'); '4724' = @('MOYEN', 'Mot de passe reinitialise'); '4732' = @('MOYEN', 'Ajout a un groupe local')
-        '4728' = @('MOYEN', 'Ajout a un groupe global'); '4756' = @('MOYEN', 'Ajout a un groupe universel'); '4697' = @('MOYEN', 'Service installe (Securite)')
-        '7045' = @('MOYEN', 'Nouveau service installe'); '4698' = @('MOYEN', 'Tache planifiee creee'); '4702' = @('FAIBLE', 'Tache planifiee modifiee')
-        '5861' = @('MOYEN', 'Abonnement WMI permanent'); '1116' = @('MOYEN', 'Defender : menace detectee'); '1117' = @('MOYEN', 'Defender : action sur menace')
-        '5007' = @('FAIBLE', 'Defender : configuration modifiee'); '5010' = @('MOYEN', 'Defender : analyse desactivee'); '5012' = @('MOYEN', 'Defender : analyse desactivee')
-        '1149' = @('FAIBLE', 'RDP : authentification reussie'); '1074' = @('INFO', 'Arret/redemarrage demande'); '6008' = @('FAIBLE', 'Arret inattendu')
-        '106' = @('FAIBLE', 'Tache planifiee enregistree'); '59' = @('MOYEN', 'Job BITS cree'); '4104' = @('INFO', 'Script PowerShell')
+        "$lSec|1102" = @('ELEVE', 'Journal Securite efface'); "$lSys|104" = @('ELEVE', 'Journal efface'); "$lSec|4720" = @('ELEVE', 'Compte cree')
+        "$lSec|4722" = @('MOYEN', 'Compte active'); "$lSec|4724" = @('MOYEN', 'Mot de passe reinitialise'); "$lSec|4732" = @('MOYEN', 'Ajout a un groupe local')
+        "$lSec|4728" = @('MOYEN', 'Ajout a un groupe global'); "$lSec|4756" = @('MOYEN', 'Ajout a un groupe universel'); "$lSec|4697" = @('MOYEN', 'Service installe (Securite)')
+        "$lSys|7045" = @('MOYEN', 'Nouveau service installe'); "$lSec|4698" = @('MOYEN', 'Tache planifiee creee'); "$lSec|4702" = @('FAIBLE', 'Tache planifiee modifiee')
+        'Microsoft-Windows-WMI-Activity/Operational|5861' = @('MOYEN', 'Abonnement WMI permanent')
+        "$lDef|1116" = @('MOYEN', 'Defender : menace detectee'); "$lDef|1117" = @('MOYEN', 'Defender : action sur menace')
+        "$lDef|5007" = @('FAIBLE', 'Defender : configuration modifiee'); "$lDef|5010" = @('MOYEN', 'Defender : analyse desactivee'); "$lDef|5012" = @('MOYEN', 'Defender : analyse desactivee')
+        'Microsoft-Windows-TerminalServices-RemoteConnectionManager/Operational|1149' = @('FAIBLE', 'RDP : authentification reussie')
+        "$lSys|1074" = @('INFO', 'Arret/redemarrage demande'); "$lSys|6008" = @('FAIBLE', 'Arret inattendu')
+        'Microsoft-Windows-TaskScheduler/Operational|106' = @('FAIBLE', 'Tache planifiee enregistree'); 'Microsoft-Windows-Bits-Client/Operational|59' = @('MOYEN', 'Job BITS cree')
+        'Microsoft-Windows-PowerShell/Operational|4104' = @('INFO', 'Script PowerShell')
     }
     $counters = @{}
     $privRx = '^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|127\.|169\.254\.|::1|fe80|-$|\s*$)'
@@ -193,18 +198,19 @@ function Mod-Journaux {
                 }
                 continue
             }
-            $rk = [string]$e.Id
-            if (($rk -eq '104' -or $rk -eq '1102') -and $e.ProviderName -ne 'Microsoft-Windows-Eventlog') { continue }
-            if ($rules.ContainsKey($rk) -and $ln -ne 'Security' -or ($ln -eq 'Security' -and $rules.ContainsKey($rk))) {
-                if ($rk -eq '4104') { if ($msg -notmatch '(?i)-enc\b|frombase64string|downloadstring|downloadfile|invoke-expression|\biex\b|net\.webclient|-executionpolicy\s+bypass|-w(indowstyle)?\s+hidden|invoke-webrequest|start-bitstransfer' -or $msg -match '__cmdletization|BLL IR-Kit|Mod-Journaux|Invoke-Module') { continue } }
+            $id = [string]$e.Id
+            $rk = $ln + '|' + $id
+            if (($id -eq '104' -or $id -eq '1102') -and $e.ProviderName -ne 'Microsoft-Windows-Eventlog') { continue }
+            if ($rules.ContainsKey($rk)) {
+                if ($id -eq '4104') { if ($msg -notmatch '(?i)-enc\b|frombase64string|downloadstring|downloadfile|invoke-expression|\biex\b|net\.webclient|-executionpolicy\s+bypass|-w(indowstyle)?\s+hidden|invoke-webrequest|start-bitstransfer' -or $msg -match '__cmdletization|BLL IR-Kit|Mod-Journaux|Invoke-Module') { continue } }
                 $sev = $rules[$rk][0]
-                if ($rk -eq '5007' -and $msg -notmatch '(?i)Exclusions|DisableAntiSpyware|DisableRealtimeMonitoring|DisableBehaviorMonitoring|DisableIOAVProtection|TamperProtection|DisableScriptScanning = 0x1|SubmitSamplesConsent') { continue }
-                if ($rk -eq '59') {
+                if ($id -eq '5007' -and $msg -notmatch '(?i)Exclusions|DisableAntiSpyware|DisableRealtimeMonitoring|DisableBehaviorMonitoring|DisableIOAVProtection|TamperProtection|DisableScriptScanning = 0x1|SubmitSamplesConsent') { continue }
+                if ($id -eq '59') {
                     if ($msg -match '(?i)https?://[^/\s]*(microsoft|windowsupdate|office|live\.com|dell\.com|google|gvt1|adobe|intel|hp\.com|lenovo|nvidia|mozilla|foxit|teamviewer)') { $sev = 'INFO' }
                 }
-                if ($rk -in '4732', '4728', '4756' -and $msg -match '(?i)Administrators|Administrateurs|S-1-5-32-544') { $sev = 'ELEVE' }
-                if ($rk -eq '4104') { $sev = 'ELEVE' }
-                if ($rk -eq '1149' -and $msg -match '(\d{1,3}\.){3}\d{1,3}' -and $Matches[0] -notmatch $privRx) { $sev = 'ELEVE' }
+                if ($id -in '4732', '4728', '4756' -and $msg -match '(?i)Administrators|Administrateurs|S-1-5-32-544') { $sev = 'ELEVE' }
+                if ($id -eq '4104') { $sev = 'ELEVE' }
+                if ($id -eq '1149' -and $msg -match '(\d{1,3}\.){3}\d{1,3}' -and $Matches[0] -notmatch $privRx) { $sev = 'ELEVE' }
                 if (-not $counters.ContainsKey($rk)) { $counters[$rk] = 0 }
                 $counters[$rk]++
                 if ($counters[$rk] -le 25) { Add-Finding $sev 'Journal Windows' ("{0} : {1} (ID {2}, {3})" -f $t, $rules[$rk][1], $e.Id, $ln) '' $msg }
@@ -214,7 +220,7 @@ function Mod-Journaux {
     $null = Save-Csv ($cov | Sort-Object Journal) 'couverture_des_journaux.csv' '06_journaux'
     $null = Save-Csv ($all | Sort-Object TempsUtc) $(if ($broad) { 'evenements_cles_periode.csv' } else { 'evenements_fenetre_tous.csv' }) '06_journaux'
     $null = Save-Csv ($conn | Sort-Object TempsUtc) 'connexions_comptes_4624_4625.csv' '06_journaux'
-    foreach ($k in $counters.Keys) { if ($counters[$k] -gt 25) { Add-Finding 'INFO' 'Journal Windows' ("Evenement {0} : {1} occurrences au total (25 premieres listees)" -f $k, $counters[$k]) } }
+    foreach ($k in $counters.Keys) { if ($counters[$k] -gt 25) { Add-Finding 'INFO' 'Journal Windows' ("Evenement {0} : {1} occurrences au total (25 premieres listees)" -f ($k -replace '^(.*)\|(\d+)$', '$2 ($1)'), $counters[$k]) } }
     $fails = @($conn | Where-Object { $_.Id -eq 4625 } | Group-Object IpSource | Where-Object { $_.Count -ge 10 -and $_.Name -notmatch $privRx })
     foreach ($f in $fails) { Add-Finding 'ELEVE' 'Connexion RDP' ("{0} echecs d'authentification depuis l'IP publique {1}" -f $f.Count, $f.Name); Add-IocSeen 'Adresse IP (echecs 4625)' $f.Name 'Journal Securite' '' ([string]$f.Count + ' echecs') }
     if (-not ($cov | Where-Object { $_.Journal -match 'Sysmon' })) { Add-Finding 'INFO' 'Journalisation' 'Sysmon absent : pas de trace detaillee des processus, connexions et fichiers' }

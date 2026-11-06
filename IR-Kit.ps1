@@ -86,6 +86,8 @@ $script:Raw = Join-Path $script:Out 'raw'
 $script:RawSens = Join-Path $script:Out 'raw_SENSIBLE'
 foreach ($d in $script:Out, $script:Raw, $script:RawSens) { $null = New-Item -ItemType Directory -Path $d -Force }
 $script:LogFile = Join-Path $script:Out 'collecte.log'
+# cles AnyDesk / historiques : acces reserve a SYSTEM et aux administrateurs des la creation
+$null = Protect-Folder $script:RawSens
 
 Say ('BLL IR-Kit v{0} - poste {1} - mode {2}' -f $script:KitVersion, $env:COMPUTERNAME, $script:Mode) 'Green'
 Say ('Fenetre analysee : {0} -> {1} UTC' -f (U $script:WinS), (U $script:WinE))
@@ -117,4 +119,4 @@ Say ''
 Say ('TERMINE en {0} min : {1} constats eleves, {2} moyens.' -f [int]((Get-Date) - $script:StartTime).TotalMinutes, $nE, $nM) 'Green'
 Say ('Ouvrez : ' + (Join-Path $script:Out 'rapport.html'))
 Say 'ATTENTION : le dossier raw_SENSIBLE contient des cles/historiques : ne le transmettez a personne sans raison.' 'Yellow'
-if (-not $SansMenu) { try { Start-Process (Join-Path $script:Out 'rapport.html') } catch { }; Read-Host 'Entree pour fermer' | Out-Null }
+if (-not $SansMenu) { Open-Rapport 'rapport.html'; Read-Host 'Entree pour fermer' | Out-Null }

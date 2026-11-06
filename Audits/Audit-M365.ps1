@@ -156,5 +156,5 @@ Invoke-Module 'Rapport' { Build-RapportAudit }
 Disconnect-MgGraph | Out-Null
 Write-Host ''
 Write-Host ('TERMINE : score {0}/100 (note {1}). Rapport : {2}' -f $script:Score, $script:Note, (Join-Path $script:Out 'rapport_audit.html')) -ForegroundColor Green
-try { Start-Process (Join-Path $script:Out 'rapport_audit.html') } catch { }
+Open-Rapport 'rapport_audit.html'
 Read-Host 'Entree pour fermer' | Out-Null
