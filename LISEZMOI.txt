@@ -68,7 +68,7 @@ LIMITES (a connaitre)
 
 
 ==============================================================================
-AUDITS ET SURVEILLANCE (v1.1)
+AUDITS ET SURVEILLANCE (v1.3)
 ==============================================================================
 
 1) BLL-IR-Kit.bat choix 2 (ou Lancer-Audit.bat)  - AUDIT D'UN POSTE (lecture seule, administrateur) -> rapport_audit.html + score /100
