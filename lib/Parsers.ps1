@@ -25,7 +25,11 @@ function Read-TextSmart {
         $nul = 0; $lim = [Math]::Min($got, 4096)
         for ($i = 0; $i -lt $lim; $i++) { if ($b[$i] -eq 0) { $nul++ } }
         if ($nul -gt ($lim / 4)) { $t = [Text.Encoding]::Unicode.GetString($b, 0, $got) }
-        else { $t = [Text.Encoding]::UTF8.GetString($b, 0, $got) }
+        else {
+            $strict = New-Object System.Text.UTF8Encoding($false, $true)
+            try { $t = $strict.GetString($b, 0, $got) }
+            catch { try { $t = [Text.Encoding]::GetEncoding(1252).GetString($b, 0, $got) } catch { $t = [Text.Encoding]::UTF8.GetString($b, 0, $got) } }
+        }
     }
     return ,@($t -split "\r?\n")
 }

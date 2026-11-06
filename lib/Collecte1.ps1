@@ -82,7 +82,8 @@ function Mod-Systeme {
     Get-LocalUser | ForEach-Object {
         $acc.Add([pscustomobject]@{ Type = 'Utilisateur local'; Nom = $_.Name; Actif = $_.Enabled; DernierLogonUtc = (U $_.LastLogon); MdpChangeUtc = (U $_.PasswordLastSet); Info = $_.Description })
         if ($_.Enabled -and $_.PasswordLastSet -and (InWindow $_.PasswordLastSet)) {
-            Add-Finding 'MOYEN' 'Compte' ("Mot de passe du compte local '{0}' change dans la fenetre" -f $_.Name) '' (U $_.PasswordLastSet)
+            $sevPw = 'MOYEN'; if ($_.Name -match '(?i)laps') { $sevPw = 'INFO' }
+            Add-Finding $sevPw 'Compte' ("Mot de passe du compte local '{0}' change dans la fenetre" -f $_.Name) '' (U $_.PasswordLastSet)
         }
         if ($_.Enabled -and $_.Name -match '(?i)^(support|admin\d*|test|temp|helpdesk|backup|svc.*|sys.*|tech)$') {
             Add-Finding 'FAIBLE' 'Compte' ("Compte local actif au nom generique : {0}" -f $_.Name)
@@ -164,7 +165,7 @@ function Mod-AccesDistant {
 
     # Processus
     Get-CimInstance Win32_Process | ForEach-Object {
-        $txt = '{0} {1} {2}' -f $_.Name, $_.ExecutablePath, $_.CommandLine
+        $txt = '{0} {1}' -f $_.Name, $_.ExecutablePath
         if ($txt -match ('(?i)' + $script:OutilsRx)) {
             $tool = Get-OutilNom $txt
             $sig = Get-SignInfo $_.ExecutablePath
@@ -211,8 +212,12 @@ function Mod-AccesDistant {
                 $tool = Get-OutilNom $it.Name
                 $inv.Add([pscustomobject]@{ Outil = $tool; Source = $(if ($it.PSIsContainer) { 'Dossier' } else { 'Fichier' }); Nom = $it.Name; Etat = ('cree ' + (U $it.CreationTimeUtc) + ' ; modifie ' + (U $it.LastWriteTimeUtc)); Chemin = $it.FullName; Signature = ''; Detail = '' })
                 $risky = Test-RiskPath $it.FullName
-                if ($risky -and -not $it.PSIsContainer -and $it.Extension -match '(?i)\.(exe|msi|zip|bat|ps1|vbs)$') {
+                if ($it.Extension -match '(?i)\.(docx?|xlsx?|pptx?|pdf|odt|md|lnk)$') {
+                    # document ou raccourci dont le NOM contient un mot cle : sans interet
+                } elseif ($risky -and -not $it.PSIsContainer -and $it.Extension -match '(?i)\.(exe|msi|zip)$') {
                     Add-Finding 'ELEVE' 'Acces distant' ("Programme d'acces distant ({0}) dans un dossier utilisateur ou temporaire" -f $tool) $it.FullName ('Cree le ' + (U $it.CreationTimeUtc))
+                } elseif ($risky -and -not $it.PSIsContainer -and $it.Extension -match '(?i)\.(bat|ps1|vbs)$') {
+                    Add-Finding 'MOYEN' 'Acces distant' ("Script mentionnant {0} dans un dossier utilisateur ou temporaire" -f $tool) $it.FullName ('Cree le ' + (U $it.CreationTimeUtc))
                 } elseif ($it.FullName -match $script:UserDirRx -and -not $it.PSIsContainer) {
                     Add-Finding 'MOYEN' 'Acces distant' ("Fichier {0} dans un profil utilisateur" -f $tool) $it.FullName ('Cree le ' + (U $it.CreationTimeUtc))
                 }
@@ -295,7 +300,7 @@ function Mod-AccesDistant {
     $null = Save-Csv $tv 'teamviewer_connexions.csv' '02_acces_distant'
     foreach ($c in $tv) {
         Add-IocSeen 'TeamViewer ID distant' $c.IdDistant ('TeamViewer ' + $c.Origine) $c.Debut $c.Nom
-        $dt = $null; $ok = [datetime]::TryParse(($c.Debut -replace '(\d\d)-(\d\d)-(\d{4})', '$3-$2-$1'), [ref]$dt)
+        $dt = $null; $ok = [datetime]::TryParseExact([string]$c.Debut, 'dd-MM-yyyy HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeLocal, [ref]$dt)
         if ($ok -and (InWindow $dt)) { Add-Finding 'MOYEN' 'TeamViewer' ("Connexion {0} de {1} ({2}) le {3}" -f $c.Type, $c.Nom, $c.IdDistant, $c.Debut) $c.Origine 'Heure locale du poste' }
     }
 
@@ -445,7 +450,7 @@ function Mod-Persistance {
                 if (Test-RiskPath $exe) { $sev = 'ELEVE'; $why += 'binaire dans un dossier a risque' }
                 if ($full -match '(?i)(-enc\b|encodedcommand|frombase64|downloadstring|\biex\b|-w(indowstyle)?\s+hidden|mshta|wscript|cscript|\.vbs|https?://)') { $sev = 'ELEVE'; $why += 'arguments suspects' }
                 if ($sig -and -not $sig.Valide -and $sev -eq 'INFO') { $sev = 'MOYEN'; $why += ('signature : ' + $sig.Statut) }
-                if ($t.Date -and $sev -eq 'INFO') { $dd = $null; if ([datetime]::TryParse([string]$t.Date, [ref]$dd) -and (InWindow $dd)) { $sev = 'MOYEN'; $why += 'creee dans la fenetre' } }
+                if ($t.Date -and $sev -eq 'INFO') { $dd = $null; try { $dd = [datetime]::Parse([string]$t.Date, [Globalization.CultureInfo]::InvariantCulture) } catch { }; if ($dd -and (InWindow $dd)) { $sev = 'MOYEN'; $why += 'creee dans la fenetre' } }
                 if ($sev -ne 'INFO') { Add-Finding $sev 'Tache planifiee' ("{0}{1} [{2}]" -f $t.TaskPath, $t.TaskName, $t.State) $exe ((($a.Arguments) + ' | ' + ($why -join '; ')).Trim(' |')) }
             }
         }

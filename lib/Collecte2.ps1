@@ -194,9 +194,14 @@ function Mod-Journaux {
                 continue
             }
             $rk = [string]$e.Id
+            if (($rk -eq '104' -or $rk -eq '1102') -and $e.ProviderName -ne 'Microsoft-Windows-Eventlog') { continue }
             if ($rules.ContainsKey($rk) -and $ln -ne 'Security' -or ($ln -eq 'Security' -and $rules.ContainsKey($rk))) {
-                if ($rk -eq '4104') { if ($msg -notmatch '(?i)-enc\b|frombase64|downloadstring|invoke-expression|\biex\b|net\.webclient|bypass|-w(indowstyle)?\s+hidden|invoke-webrequest|start-bitstransfer') { continue } }
+                if ($rk -eq '4104') { if ($msg -notmatch '(?i)-enc\b|frombase64string|downloadstring|downloadfile|invoke-expression|\biex\b|net\.webclient|-executionpolicy\s+bypass|-w(indowstyle)?\s+hidden|invoke-webrequest|start-bitstransfer' -or $msg -match '__cmdletization|BLL IR-Kit|Mod-Journaux|Invoke-Module') { continue } }
                 $sev = $rules[$rk][0]
+                if ($rk -eq '5007' -and $msg -notmatch '(?i)Exclusions|DisableAntiSpyware|DisableRealtimeMonitoring|DisableBehaviorMonitoring|DisableIOAVProtection|TamperProtection|DisableScriptScanning = 0x1|SubmitSamplesConsent') { continue }
+                if ($rk -eq '59') {
+                    if ($msg -match '(?i)https?://[^/\s]*(microsoft|windowsupdate|office|live\.com|dell\.com|google|gvt1|adobe|intel|hp\.com|lenovo|nvidia|mozilla|foxit|teamviewer)') { $sev = 'INFO' }
+                }
                 if ($rk -in '4732', '4728', '4756' -and $msg -match '(?i)Administrators|Administrateurs|S-1-5-32-544') { $sev = 'ELEVE' }
                 if ($rk -eq '4104') { $sev = 'ELEVE' }
                 if ($rk -eq '1149' -and $msg -match '(\d{1,3}\.){3}\d{1,3}' -and $Matches[0] -notmatch $privRx) { $sev = 'ELEVE' }
@@ -257,11 +262,12 @@ function Mod-Reseau {
     $null = Save-Csv (Get-NetNeighbor | Where-Object { $_.State -ne 'Unreachable' } | Select-Object IPAddress, LinkLayerAddress, State, InterfaceAlias) 'arp.csv' '07_reseau'
     $null = Save-Csv (Get-NetIPConfiguration | ForEach-Object { [pscustomobject]@{ Interface = $_.InterfaceAlias; IPv4 = ($_.IPv4Address.IPAddress -join ','); Passerelle = ($_.IPv4DefaultGateway.NextHop -join ','); DNS = ($_.DNSServer.ServerAddresses -join ',') } }) 'interfaces.csv' '07_reseau'
     $fw = New-Object System.Collections.Generic.List[object]
+    $script:FwSeen = @()
     Get-NetFirewallRule -Enabled True -Direction Inbound -Action Allow | ForEach-Object {
         $app = ($_ | Get-NetFirewallApplicationFilter).Program
         $port = ($_ | Get-NetFirewallPortFilter).LocalPort
         $fw.Add([pscustomobject]@{ Nom = $_.DisplayName; Profil = $_.Profile; Programme = $app; PortLocal = ($port -join ',') })
-        if ($app -and $app -ne 'Any' -and (Test-RiskPath $app)) { Add-Finding 'ELEVE' 'Pare-feu' ("Regle entrante autorisee pour un binaire a risque : {0}" -f $_.DisplayName) $app }
+        if ($app -and $app -ne 'Any' -and (Test-RiskPath $app) -and $script:FwSeen -notcontains ($_.DisplayName + '|' + $app)) { $script:FwSeen += ($_.DisplayName + '|' + $app); Add-Finding 'ELEVE' 'Pare-feu' ("Regle entrante autorisee pour un binaire a risque : {0}" -f $_.DisplayName) $app }
     }
     $null = Save-Csv $fw 'pare_feu_regles_entrantes.csv' '07_reseau'
     $null = Save-Csv (Get-SmbSession | Select-Object ClientComputerName, ClientUserName, NumOpens, SecondsExists) 'sessions_smb_entrantes.csv' '07_reseau'

@@ -1,0 +1,4 @@
+# Destinations de sauvegarde a verifier : chemin;age maximum en heures (defaut 36)
+# Exemples (a adapter a chaque pharmacie) :
+# D:\Sauvegarde;36
+# \\NAS\sauvegardes\winpharma;30

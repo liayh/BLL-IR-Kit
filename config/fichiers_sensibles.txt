@@ -1,0 +1,2 @@
+# Expressions regulieres supplementaires (noms de fichiers sensibles a chercher dans Bureau/Telechargements/Documents/Public)
+# Exemple : facture.*fournisseur

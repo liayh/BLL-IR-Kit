@@ -1,0 +1,5 @@
+# Indicateurs recherches dans toutes les donnees collectees (une valeur par ligne, # = commentaire)
+# Incident AnyDesk du 31/10/2026 (Angers) : ID distant, empreinte de cle, IP source
+1521338002
+bf858d0acc1c
+23.234.85.44

@@ -5,9 +5,9 @@ PRINCIPE
   Copier le dossier sur une cle USB. Sur le poste a examiner : double-clic sur Lancer.bat
   (accepter l'elevation administrateur). Tout est ecrit a cote de l'outil, dans :
      Resultats\<POSTE>_<date>\
-  Aucune installation ni modification permanente n'est prevue. La collecte lit le poste
-  et ecrit les resultats sur le support. Le mode VSS cree un instantane temporaire,
-  supprime en fin de collecte si le nettoyage reussit.
+  Aucune installation ni modification permanente pour la collecte : l'outil lit le poste et ecrit les
+  resultats sur le support. Le mode VSS cree un instantane temporaire, supprime en fin de collecte
+  si le nettoyage reussit (verifier collecte.log : un instantane peut subsister si le nettoyage echoue).
   Ne jamais ecrire sur un partage reseau depuis un poste suspect : utiliser la cle USB.
 
 MODES
@@ -37,8 +37,45 @@ CONFIGURATION (dossier config\)
 
 LIMITES (a connaitre)
   - Les dates sont en UTC. L'absence de trace ne prouve rien (journaux limites, effacement).
-  - En mode VSS, verifier le journal de collecte : un instantane peut subsister si son nettoyage echoue.
   - L'adresse IP vue dans les traces AnyDesk est celle du relais/VPN eventuel de l'attaquant.
   - Les resultats signalent des elements A VERIFIER, ils ne concluent pas seuls a une compromission.
   - Outils/Activer-Journalisation.ps1 MODIFIE le poste : uniquement apres la collecte et avec accord.
   - Premiere utilisation : tester sur un poste non critique avant un poste en incident.
+
+
+==============================================================================
+AUDITS ET SURVEILLANCE (v1.1)
+==============================================================================
+
+1) Lancer-Audit.bat  - AUDIT D'UN POSTE (lecture seule, administrateur) -> rapport_audit.html + score /100
+   - Durcissement Windows : version supportee, SMBv1, RDP/NLA, BitLocker, Defender (+exclusions), pare-feu, UAC,
+     WDigest/LSASS/NTLM, PowerShell v2, journalisation, comptes locaux (admins, invite, sans mot de passe), LAPS,
+     outils d'acces distant non declares.
+   - Correctifs : age du dernier correctif, Windows Update, mises a jour en attente, logiciels en fin de vie
+     (Flash, Java, Office anciens, WinRAR/7-Zip vulnerables...), navigateurs a jour, BIOS.
+   - Sauvegardes : logiciels/services/taches de sauvegarde, instantanes VSS, fraicheur et test de lecture des
+     destinations declarees (config\sauvegardes.txt), lecteurs reseau/disques amovibles exposes a un rancongiciel.
+   - Partages et donnees : partages SMB ouverts a tous, acces invite, fichiers sensibles laisses dans
+     Bureau/Telechargements/Public (exports safipayment, mots de passe, donnees patients...).
+   - Reseau local : decouverte des equipements, ports a risque (Telnet, FTP, VNC, RDP, bases de donnees), cameras/NVR,
+     serveur DHCP pirate, UPnP et redirections de ports de la box. A lancer depuis un poste de l'officine.
+   Option : Audit-Kit.ps1 -Modules Sauvegardes,Reseau -Rapide
+
+2) Lancer-M365.bat  - AUDIT MICROSOFT 365 (lecture seule, depuis VOTRE poste, connexion admin du tenant)
+   MFA (Security Defaults / acces conditionnel / par utilisateur), administrateurs generaux, comptes inactifs et
+   invites, applications tierces consenties, connexions hors de France, authentification heritee, redirections de
+   messagerie, regles de boite suspectes, regles de transport, POP/IMAP, SMTP AUTH.
+   Installe au besoin Microsoft.Graph.Authentication et ExchangeOnlineManagement (utilisateur courant).
+   Option : -SansExchange   -Pays FR,BE
+
+3) SURVEILLANCE CONTINUE : Outils\Installer-Surveillance.ps1 (administrateur, sur un poste SAIN)
+   - Etat actuel = reference. Tache planifiee SYSTEM toutes les 4 h et au demarrage (dossier C:\ProgramData\BLL\Surveillance).
+   - Alerte (webhook Teams/Slack/Discord/ntfy, mail, journal d'evenements Windows) si : nouvel administrateur ou
+     compte, nouvel outil d'acces distant, nouveau service/tache/demarrage, nouvelle regle de pare-feu entrante,
+     nouveau partage, exclusion Defender, portproxy, modification du fichier hosts, RDP active, journal efface,
+     session RDP depuis une IP publique, detection Defender, connexion AnyDesk ou TeamViewer ENTRANTE.
+   - Signe de vie hebdomadaire : l'absence de message signale une panne de surveillance.
+   - Apres un changement legitime : Surveiller.ps1 -Init, ou ajouter un motif dans autorises.txt.
+   - Retrait : Outils\Desinstaller-Surveillance.ps1.
+
+CONFIG SUPPLEMENTAIRE : config\sauvegardes.txt (destinations;age max en heures), config\fichiers_sensibles.txt.
