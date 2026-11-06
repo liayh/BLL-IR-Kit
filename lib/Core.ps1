@@ -1,6 +1,6 @@
 ﻿# Core.ps1 - etat global, journalisation, resultats, copie de preuves (empreintes + dates d'origine)
 
-$script:KitVersion = '1.2.1'
+$script:KitVersion = '1.2.2'
 $script:Findings   = New-Object System.Collections.Generic.List[object]
 $script:Errors     = New-Object System.Collections.Generic.List[string]
 $script:Manifest   = New-Object System.Collections.Generic.List[object]
@@ -225,8 +225,16 @@ function Protect-Folder {
             return $false
         }
         # SID plutot que noms : fonctionne sur un Windows en francais
-        $null = & icacls.exe $full /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /T /C /Q 2>&1
+        # Pas de /T : sur un dossier deja rempli, /T retire les droits heritables des fichiers et les rend
+        # illisibles meme pour les administrateurs. Les fichiers heritent du dossier protege.
+        $null = & icacls.exe $full /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /C /Q 2>&1
         if ($LASTEXITCODE -ne 0) { Say ('ATTENTION : droits non appliques sur ' + $full) 'Yellow'; return $false }
+        # controle : chaque fichier doit rester lisible par un administrateur ; sinon on reactive l'heritage
+        foreach ($f in (Get-ChildItem -LiteralPath $full -Recurse -File -Force -ErrorAction SilentlyContinue)) {
+            $okRead = $true
+            try { $fs = [IO.File]::Open($f.FullName, 'Open', 'Read', 'ReadWrite'); $fs.Dispose() } catch { $okRead = $false }
+            if (-not $okRead) { $null = & icacls.exe $f.FullName /inheritance:e /C /Q 2>&1 }
+        }
         return $true
     } catch {
         Say ('ATTENTION : protection impossible de ' + $Path + ' : ' + $_.Exception.Message) 'Yellow'
