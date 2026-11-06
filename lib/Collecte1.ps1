@@ -300,7 +300,7 @@ function Mod-AccesDistant {
     $null = Save-Csv $tv 'teamviewer_connexions.csv' '02_acces_distant'
     foreach ($c in $tv) {
         Add-IocSeen 'TeamViewer ID distant' $c.IdDistant ('TeamViewer ' + $c.Origine) $c.Debut $c.Nom
-        $dt = $null; $ok = [datetime]::TryParseExact([string]$c.Debut, 'dd-MM-yyyy HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeLocal, [ref]$dt)
+        $dt = [datetime]::MinValue; $ok = [datetime]::TryParseExact([string]$c.Debut, 'dd-MM-yyyy HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeLocal, [ref]$dt)
         if ($ok -and (InWindow $dt)) { Add-Finding 'MOYEN' 'TeamViewer' ("Connexion {0} de {1} ({2}) le {3}" -f $c.Type, $c.Nom, $c.IdDistant, $c.Debut) $c.Origine 'Heure locale du poste' }
     }
 

@@ -1,6 +1,6 @@
 ﻿# Core.ps1 - etat global, journalisation, resultats, copie de preuves (empreintes + dates d'origine)
 
-$script:KitVersion = '1.2.0'
+$script:KitVersion = '1.2.1'
 $script:Findings   = New-Object System.Collections.Generic.List[object]
 $script:Errors     = New-Object System.Collections.Generic.List[string]
 $script:Manifest   = New-Object System.Collections.Generic.List[object]
@@ -295,16 +295,33 @@ function Save-Resultats {
             Copy-Item -LiteralPath $src -Destination $dest -Recurse -Force -ErrorAction Stop
             if ($hasZip) { Copy-Item -LiteralPath $zip -Destination $parent -Force }
             if ($hasSens) { $null = Protect-Folder (Join-Path $dest 'raw_SENSIBLE') }
-            # verification fichier par fichier
-            $bad = 0; $n = 0
+            # verification fichier par fichier (le journal de collecte, encore ouvert en ecriture, est ignore)
+            $bad = New-Object System.Collections.Generic.List[string]; $n = 0
             foreach ($f in (Get-ChildItem -LiteralPath $src -Recurse -File -Force)) {
+                if ($f.Name -eq 'collecte.log' -or $f.Name -eq 'audit.log') { continue }
                 $rel = $f.FullName.Substring($src.Length)
                 $g = Join-Path $dest $rel.TrimStart('\')
                 $n++
-                if (-not (Test-Path -LiteralPath $g) -or (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $g -Algorithm SHA256).Hash) { $bad++ }
+                $why = ''
+                try {
+                    if (-not (Test-Path -LiteralPath $g)) { $why = 'absent' }
+                    elseif ((Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256 -ErrorAction Stop).Hash -ne (Get-FileHash -LiteralPath $g -Algorithm SHA256 -ErrorAction Stop).Hash) { $why = 'empreinte differente' }
+                } catch { $why = 'illisible : ' + $_.Exception.Message }
+                if ($why) {
+                    # une seconde tentative par copie en flux (chemin long, fichier momentanement verrouille)
+                    try {
+                        $null = Copy-OneFile $f.FullName $g
+                        if ((Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash -eq (Get-FileHash -LiteralPath $g -Algorithm SHA256).Hash) { $why = '' }
+                    } catch { $why = $why + ' ; 2e tentative : ' + $_.Exception.Message }
+                }
+                if ($why) { $bad.Add(($rel.TrimStart('\') + '  [' + $why + ']')) }
             }
-            if ($bad -eq 0) { Say ('Resultats enregistres et verifies (' + $n + ' fichiers) : ' + $dest) 'Green' }
-            else { Say ('ERREUR : ' + $bad + ' fichier(s) sur ' + $n + ' manquants ou differents dans ' + $dest) 'Red' }
+            if ($bad.Count -eq 0) { Say ('Resultats enregistres et verifies (' + $n + ' fichiers) : ' + $dest) 'Green' }
+            else {
+                Say ('ERREUR : ' + $bad.Count + ' fichier(s) sur ' + $n + ' manquants ou differents dans ' + $dest) 'Red'
+                foreach ($b in ($bad | Select-Object -First 10)) { Say ('   - ' + $b) 'Red' }
+                try { Set-Content -LiteralPath (Join-Path $parent ($stampName + '_verification_copie.txt')) -Value $bad -Encoding UTF8 } catch { }
+            }
             if ($hasSens) { Say 'Cette copie contient raw_SENSIBLE : ne la transmettez a personne.' 'Yellow' }
         }
     } catch {
