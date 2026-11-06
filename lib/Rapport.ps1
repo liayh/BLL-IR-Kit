@@ -123,7 +123,7 @@ function Close-Collecte {
                     $entry = $file.FullName.Substring($baseLen) -replace '\\', '/'
                     $in = New-Object IO.FileStream($file.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]'ReadWrite,Delete'))
                     $e = $za.CreateEntry($entry, [System.IO.Compression.CompressionLevel]::Optimal)
-                    $e.LastWriteTime = $file.LastWriteTime
+                    try { $e.LastWriteTime = $file.LastWriteTime } catch { }   # date hors plage ZIP (avant 1980) : date du jour
                     $o = $e.Open(); $in.CopyTo($o)
                 } catch {
                     $fails++

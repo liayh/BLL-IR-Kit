@@ -90,9 +90,11 @@ function Mod-Systeme {
         }
     }
     foreach ($g in @{ N = 'Administrateurs'; S = 'S-1-5-32-544' }, @{ N = 'Bureau a distance'; S = 'S-1-5-32-555' }, @{ N = 'Gestion a distance'; S = 'S-1-5-32-580' }) {
-        Get-LocalGroupMember -SID $g.S | ForEach-Object {
-            $acc.Add([pscustomobject]@{ Type = ('Membre : ' + $g.N); Nom = $_.Name; Actif = ''; DernierLogonUtc = ''; MdpChangeUtc = ''; Info = [string]$_.PrincipalSource })
-            Add-Finding 'INFO' 'Compte' ("Membre du groupe {0} : {1}" -f $g.N, $_.Name)
+        $mem = Get-GroupMemberNames $g.S
+        if ($null -eq $mem) { Say ('   Membres du groupe ' + $g.N + ' illisibles') 'Yellow'; continue }
+        foreach ($nm in $mem) {
+            $acc.Add([pscustomobject]@{ Type = ('Membre : ' + $g.N); Nom = $nm; Actif = ''; DernierLogonUtc = ''; MdpChangeUtc = ''; Info = '' })
+            Add-Finding 'INFO' 'Compte' ("Membre du groupe {0} : {1}" -f $g.N, $nm)
         }
     }
     Get-CimInstance Win32_UserProfile | Where-Object { -not $_.Special } | ForEach-Object {
@@ -139,7 +141,8 @@ function Mod-Systeme {
     $cfg.Add('--- Partages SMB ---')
     Get-SmbShare | ForEach-Object { $cfg.Add(('{0} -> {1}' -f $_.Name, $_.Path)) }
     $cfg.Add('--- Audit : creation de processus (4688) ---')
-    $ap = & auditpol.exe /get /subcategory:"Process Creation" 2>$null
+    # GUID de la sous-categorie : le nom ("Process Creation") est traduit sur un Windows en francais
+    $ap = & auditpol.exe /get /subcategory:'{0CCE922B-69AE-11D9-BED3-505054503030}' 2>$null
     $ap | ForEach-Object { $cfg.Add($_) }
     if (-not ($ap -match '(Succ|Success|Réussite|Reussite)')) {
         Add-Finding 'MOYEN' 'Journalisation' 'Audit de creation de processus (4688) inactif : les programmes lances ne sont pas traces' '' 'Voir Outils\Activer-Journalisation.ps1'
@@ -208,6 +211,7 @@ function Mod-AccesDistant {
         if (-not (Test-Path -LiteralPath $b.P)) { continue }
         $items = if ($b.D -gt 0) { Get-ChildItem -LiteralPath $b.P -Force -Recurse -Depth $b.D -ErrorAction SilentlyContinue } else { Get-ChildItem -LiteralPath $b.P -Force -ErrorAction SilentlyContinue }
         foreach ($it in $items) {
+            if (Test-OwnPath $it.FullName) { continue }
             if ($it.Name -match ('(?i)' + $script:OutilsRx)) {
                 $tool = Get-OutilNom $it.Name
                 $inv.Add([pscustomobject]@{ Outil = $tool; Source = $(if ($it.PSIsContainer) { 'Dossier' } else { 'Fichier' }); Nom = $it.Name; Etat = ('cree ' + (U $it.CreationTimeUtc) + ' ; modifie ' + (U $it.LastWriteTimeUtc)); Chemin = $it.FullName; Signature = ''; Detail = '' })

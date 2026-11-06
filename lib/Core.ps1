@@ -1,6 +1,6 @@
 ﻿# Core.ps1 - etat global, journalisation, resultats, copie de preuves (empreintes + dates d'origine)
 
-$script:KitVersion = '1.2.2'
+$script:KitVersion = '1.2.3'
 $script:Findings   = New-Object System.Collections.Generic.List[object]
 $script:Errors     = New-Object System.Collections.Generic.List[string]
 $script:Manifest   = New-Object System.Collections.Generic.List[object]
@@ -213,6 +213,52 @@ function Copy-Evidence {
 # ---------------------------------------------------------------------------
 # Protection des donnees sensibles : seuls SYSTEM et les administrateurs y accedent
 # ---------------------------------------------------------------------------
+function Set-AdminOnlyAcl {
+    # 1) la RACINE seule recoit SYSTEM + Administrateurs (heritables), sans heritage du parent.
+    #    Jamais /grant avec /T : applique aux fichiers, il leur laisse une liste de droits vide
+    #    (fichiers illisibles meme pour un administrateur - bug corrige en 1.2.2/1.2.3).
+    # 2) le CONTENU est remis a l'heritage pur (/reset) : chaque fichier recoit exactement les droits de la racine.
+    # SID plutot que noms : fonctionne sur un Windows en francais.
+    param([string]$Full)
+    $null = & icacls.exe $Full /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /C /Q 2>&1
+    if ($LASTEXITCODE -ne 0) { Say ('ATTENTION : droits non appliques sur ' + $Full) 'Yellow'; return $false }
+    if (@(Get-ChildItem -LiteralPath $Full -Force -ErrorAction SilentlyContinue).Count -gt 0) {
+        $null = & icacls.exe (Join-Path $Full '*') /reset /T /C /Q 2>&1
+    }
+    # controle : tout fichier doit rester lisible par un administrateur
+    $ko = 0
+    foreach ($f in (Get-ChildItem -LiteralPath $Full -Recurse -File -Force -ErrorAction SilentlyContinue)) {
+        try { $fs = [IO.File]::Open($f.FullName, 'Open', 'Read', 'ReadWrite'); $fs.Dispose() } catch { $ko++ }
+    }
+    if ($ko -gt 0) { Say ('ATTENTION : ' + $ko + ' fichier(s) illisible(s) dans ' + $Full) 'Yellow'; return $false }
+    return $true
+}
+
+function Test-OwnPath {
+    # vrai si le chemin appartient a l'outil ou a ses resultats (a ne pas analyser comme une trace du poste)
+    param([string]$Path)
+    if (-not $Path) { return $false }
+    foreach ($r in @($script:KitRoot, $script:Out)) {
+        if ($r -and $r.TrimEnd('\').Length -gt 3 -and $Path.StartsWith($r.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    return $false
+}
+
+function Get-GroupMemberNames {
+    # membres d'un groupe local par SID ; repli ADSI si Get-LocalGroupMember echoue (compte orphelin, poste Entra)
+    param([string]$Sid)
+    # virgule : un groupe vide renvoie un tableau vide (et non $null, reserve a l'echec)
+    try { return ,@(Get-LocalGroupMember -SID $Sid -ErrorAction Stop | ForEach-Object { [string]$_.Name }) } catch { }
+    try {
+        $gn = (New-Object Security.Principal.SecurityIdentifier($Sid)).Translate([Security.Principal.NTAccount]).Value.Split('\')[-1]
+        $g = [ADSI]('WinNT://./' + $gn + ',group')
+        return ,@($g.Invoke('Members') | ForEach-Object {
+            $p = [string]$_.GetType().InvokeMember('ADsPath', 'GetProperty', $null, $_, $null)
+            ($p -replace '^WinNT://', '') -replace '/', '\'
+        })
+    } catch { return $null }
+}
+
 function Protect-Folder {
     param([string]$Path)
     try {
@@ -224,18 +270,7 @@ function Protect-Folder {
             Say ('ATTENTION : le support ' + $root + ' est en ' + $fmt + ' (pas de droits d''acces) : raw_SENSIBLE est lisible par quiconque a la cle. Gardez-la sous clef.') 'Yellow'
             return $false
         }
-        # SID plutot que noms : fonctionne sur un Windows en francais
-        # Pas de /T : sur un dossier deja rempli, /T retire les droits heritables des fichiers et les rend
-        # illisibles meme pour les administrateurs. Les fichiers heritent du dossier protege.
-        $null = & icacls.exe $full /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /C /Q 2>&1
-        if ($LASTEXITCODE -ne 0) { Say ('ATTENTION : droits non appliques sur ' + $full) 'Yellow'; return $false }
-        # controle : chaque fichier doit rester lisible par un administrateur ; sinon on reactive l'heritage
-        foreach ($f in (Get-ChildItem -LiteralPath $full -Recurse -File -Force -ErrorAction SilentlyContinue)) {
-            $okRead = $true
-            try { $fs = [IO.File]::Open($f.FullName, 'Open', 'Read', 'ReadWrite'); $fs.Dispose() } catch { $okRead = $false }
-            if (-not $okRead) { $null = & icacls.exe $f.FullName /inheritance:e /C /Q 2>&1 }
-        }
-        return $true
+        return (Set-AdminOnlyAcl $full)
     } catch {
         Say ('ATTENTION : protection impossible de ' + $Path + ' : ' + $_.Exception.Message) 'Yellow'
         return $false
@@ -300,29 +335,43 @@ function Save-Resultats {
             $dest = Join-Path $parent $stampName
             if ($dest.TrimEnd('\') -eq $src -or $dest.StartsWith($src + '\', [StringComparison]::OrdinalIgnoreCase)) { Say 'Destination invalide (dossier des resultats lui-meme).' 'Red'; return }
             if (Test-Path -LiteralPath $dest) { Say ('Destination deja existante, rien n''est ecrase : ' + $dest) 'Red'; return }
-            Copy-Item -LiteralPath $src -Destination $dest -Recurse -Force -ErrorAction Stop
-            if ($hasZip) { Copy-Item -LiteralPath $zip -Destination $parent -Force }
-            if ($hasSens) { $null = Protect-Folder (Join-Path $dest 'raw_SENSIBLE') }
-            # verification fichier par fichier (le journal de collecte, encore ouvert en ecriture, est ignore)
+            # 1) arborescence ; raw_SENSIBLE est protege AVANT d'y copier quoi que ce soit :
+            #    les fichiers copies heritent des droits, aucun droit n'est modifie apres coup.
+            $null = New-Item -ItemType Directory -Path $dest -Force -ErrorAction Stop
+            if ($hasSens) {
+                $ds = Join-Path $dest 'raw_SENSIBLE'
+                $null = New-Item -ItemType Directory -Path $ds -Force -ErrorAction Stop
+                $null = Protect-Folder $ds
+            }
+            foreach ($d in (Get-ChildItem -LiteralPath $src -Recurse -Directory -Force)) {
+                $null = New-Item -ItemType Directory -Path (Join-Path $dest $d.FullName.Substring($src.Length).TrimStart('\')) -Force
+            }
+            # 2) copie en flux + verification immediate : empreinte de l'original (lue pendant la copie)
+            #    comparee a l'empreinte de la copie relue sur le disque ; 2 tentatives par fichier.
+            #    Le journal (encore ouvert en ecriture) est copie mais ne peut pas etre compare.
             $bad = New-Object System.Collections.Generic.List[string]; $n = 0
             foreach ($f in (Get-ChildItem -LiteralPath $src -Recurse -File -Force)) {
-                if ($f.Name -eq 'collecte.log' -or $f.Name -eq 'audit.log') { continue }
-                $rel = $f.FullName.Substring($src.Length)
-                $g = Join-Path $dest $rel.TrimStart('\')
-                $n++
-                $why = ''
-                try {
-                    if (-not (Test-Path -LiteralPath $g)) { $why = 'absent' }
-                    elseif ((Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256 -ErrorAction Stop).Hash -ne (Get-FileHash -LiteralPath $g -Algorithm SHA256 -ErrorAction Stop).Hash) { $why = 'empreinte differente' }
-                } catch { $why = 'illisible : ' + $_.Exception.Message }
-                if ($why) {
-                    # une seconde tentative par copie en flux (chemin long, fichier momentanement verrouille)
+                $rel = $f.FullName.Substring($src.Length).TrimStart('\')
+                $g = Join-Path $dest $rel
+                $isLog = ($f.Name -eq 'collecte.log' -or $f.Name -eq 'audit.log')
+                $why = 'non copie'
+                for ($try = 1; $try -le 2 -and $why; $try++) {
                     try {
-                        $null = Copy-OneFile $f.FullName $g
-                        if ((Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash -eq (Get-FileHash -LiteralPath $g -Algorithm SHA256).Hash) { $why = '' }
-                    } catch { $why = $why + ' ; 2e tentative : ' + $_.Exception.Message }
+                        $h1 = Copy-OneFile $f.FullName $g
+                        try { $o = Get-Item -LiteralPath $g -Force; $o.CreationTimeUtc = $f.CreationTimeUtc; $o.LastWriteTimeUtc = $f.LastWriteTimeUtc } catch { }
+                        if ($isLog) { $why = '' }
+                        else {
+                            $h2 = (Get-FileHash -LiteralPath $g -Algorithm SHA256 -ErrorAction Stop).Hash
+                            if ($h1 -eq $h2) { $why = '' } else { $why = 'empreinte differente' }
+                        }
+                    } catch { $why = $_.Exception.Message }
                 }
-                if ($why) { $bad.Add(($rel.TrimStart('\') + '  [' + $why + ']')) }
+                if (-not $isLog) { $n++ }
+                if ($why) { $bad.Add(($rel + '  [' + $why + ']')) }
+            }
+            if ($hasZip) {
+                try { Copy-Item -LiteralPath $zip -Destination $parent -Force -ErrorAction Stop }
+                catch { $bad.Add(((Split-Path -Leaf $zip) + '  [' + $_.Exception.Message + ']')) }
             }
             if ($bad.Count -eq 0) { Say ('Resultats enregistres et verifies (' + $n + ' fichiers) : ' + $dest) 'Green' }
             else {

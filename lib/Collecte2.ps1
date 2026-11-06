@@ -171,11 +171,24 @@ function Mod-Journaux {
         if ($ln -in 'Security', 'System', 'Microsoft-Windows-PowerShell/Operational') {
             if ($oldU -and $oldU -gt $script:WinS) { Add-Finding 'MOYEN' 'Couverture des journaux' ("Le journal {0} ne remonte qu'au {1} UTC : il ne couvre pas le debut de la fenetre analysee" -f $ln, (U $oldU)) '' 'Absence de trace dans ce journal ne prouve rien' }
         }
-        $filter = @{ LogName = $ln; StartTime = $locS; EndTime = $locE }
-        if ($broad -and $keyIds.ContainsKey($ln)) { $filter.Id = $keyIds[$ln] }
-        elseif ($broad) { return }
-        $events = $null
-        try { $events = Get-WinEvent -FilterHashtable $filter -MaxEvents 60000 -ErrorAction Stop } catch { return }
+        if ($broad -and -not $keyIds.ContainsKey($ln)) { return }
+        # Windows refuse un filtre de plus de 23 numeros d'evenement ("requete invalide") :
+        # les numeros sont donc demandes par lots de 20 (le journal Securite en compte 24).
+        $idSets = New-Object System.Collections.Generic.List[object]
+        if ($broad) {
+            $ids = @($keyIds[$ln])
+            for ($i = 0; $i -lt $ids.Count; $i += 20) { $idSets.Add(@($ids[$i..([Math]::Min($i + 19, $ids.Count - 1))])) }
+        } else { $idSets.Add($null) }
+        $events = New-Object System.Collections.Generic.List[object]
+        foreach ($set in $idSets) {
+            $filter = @{ LogName = $ln; StartTime = $locS; EndTime = $locE }
+            if ($set) { $filter.Id = $set }
+            try { foreach ($ev in (Get-WinEvent -FilterHashtable $filter -MaxEvents 60000 -ErrorAction Stop)) { $events.Add($ev) } }
+            catch {
+                # "aucun evenement" est normal ; toute autre erreur sur un journal cle est signalee
+                if ($_.FullyQualifiedErrorId -notmatch 'NoMatchingEventsFound' -and $keyIds.ContainsKey($ln)) { $script:Errors.Add('Journal ' + $ln + ' : ' + $_.Exception.Message) }
+            }
+        }
         foreach ($e in $events) {
             if ($e.Id -in $noisy -and $ln -eq 'Security') { continue }
             $msg = ([string]$e.Message) -replace '\s+', ' '
@@ -269,9 +282,14 @@ function Mod-Reseau {
     $null = Save-Csv (Get-NetIPConfiguration | ForEach-Object { [pscustomobject]@{ Interface = $_.InterfaceAlias; IPv4 = ($_.IPv4Address.IPAddress -join ','); Passerelle = ($_.IPv4DefaultGateway.NextHop -join ','); DNS = ($_.DNSServer.ServerAddresses -join ',') } }) 'interfaces.csv' '07_reseau'
     $fw = New-Object System.Collections.Generic.List[object]
     $script:FwSeen = @()
+    # filtres lus en une fois (la lecture regle par regle prenait plusieurs minutes)
+    $appF = @{}; $portF = @{}
+    try { Get-NetFirewallApplicationFilter -All | ForEach-Object { $appF[[string]$_.InstanceID] = $_.Program } } catch { }
+    try { Get-NetFirewallPortFilter -All | ForEach-Object { $portF[[string]$_.InstanceID] = $_.LocalPort } } catch { }
     Get-NetFirewallRule -Enabled True -Direction Inbound -Action Allow | ForEach-Object {
-        $app = ($_ | Get-NetFirewallApplicationFilter).Program
-        $port = ($_ | Get-NetFirewallPortFilter).LocalPort
+        $rid = [string]$_.InstanceID
+        if ($appF.ContainsKey($rid)) { $app = $appF[$rid] } else { $app = ($_ | Get-NetFirewallApplicationFilter).Program }
+        if ($portF.ContainsKey($rid)) { $port = $portF[$rid] } else { $port = ($_ | Get-NetFirewallPortFilter).LocalPort }
         $fw.Add([pscustomobject]@{ Nom = $_.DisplayName; Profil = $_.Profile; Programme = $app; PortLocal = ($port -join ',') })
         if ($app -and $app -ne 'Any' -and (Test-RiskPath $app) -and $script:FwSeen -notcontains ($_.DisplayName + '|' + $app)) { $script:FwSeen += ($_.DisplayName + '|' + $app); Add-Finding 'ELEVE' 'Pare-feu' ("Regle entrante autorisee pour un binaire a risque : {0}" -f $_.DisplayName) $app }
     }
@@ -305,11 +323,14 @@ function Mod-Fichiers {
     $extCount = @{}
     $recent3 = (Get-Date).ToUniversalTime().AddDays(-3)
     $max = 20000
+    $own = @(@($script:KitRoot, $script:Out) | Where-Object { $_ -and $_.TrimEnd('\').Length -gt 3 } | ForEach-Object { [regex]::Escape($_.TrimEnd('\') + '\') })
+    $ownRx = $null; if ($own.Count -gt 0) { $ownRx = '(?i)^(' + ($own -join '|') + ')' }
     $drives = [IO.DriveInfo]::GetDrives() | Where-Object { $_.DriveType -eq 'Fixed' -and $_.IsReady }
     foreach ($dr in $drives) {
         Say ("   Parcours de {0} (plusieurs minutes, ne fermez pas la fenetre)..." -f $dr.Name)
         Get-ChildItem -LiteralPath $dr.RootDirectory.FullName -Recurse -Force -File -ErrorAction SilentlyContinue | ForEach-Object {
             $f = $_
+            if ($ownRx -and $f.FullName -match $ownRx) { return }   # l'outil et ses resultats ne sont pas des traces du poste
             $c = $f.CreationTimeUtc; $w = $f.LastWriteTimeUtc; $a = $f.LastAccessTimeUtc
             $path = $f.FullName; $ext = $f.Extension.ToLower(); $name = $f.Name
             $inC = ($c -ge $script:WinS -and $c -le $script:WinE); $inW = ($w -ge $script:WinS -and $w -le $script:WinE)

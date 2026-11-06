@@ -36,9 +36,12 @@ New-Item -ItemType Directory -Path $dest -Force | Out-Null
 # (sinon un simple utilisateur pourrait remplacer le script et prendre le controle du poste, ou lire le mot de passe SMTP).
 # SID plutot que noms de groupes : fonctionne sur un Windows en francais.
 $bll = Split-Path -Parent $dest
+# Droits poses sur la RACINE seulement, puis contenu remis a l'heritage (/reset) : jamais /grant avec /T,
+# qui laisse aux fichiers existants (reinstallation) une liste de droits vide = script illisible par SYSTEM.
 $null = & icacls.exe $bll /setowner '*S-1-5-32-544' /T /C /Q 2>&1
-$null = & icacls.exe $bll /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /T /C /Q 2>&1
+$null = & icacls.exe $bll /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /C /Q 2>&1
 if ($LASTEXITCODE -ne 0) { Write-Host ('ERREUR : impossible de proteger ' + $bll + '. Installation annulee.') -ForegroundColor Red; Read-Host 'Entree pour fermer' | Out-Null; exit 1 }
+$null = & icacls.exe (Join-Path $bll '*') /reset /T /C /Q 2>&1
 Copy-Item -LiteralPath (Join-Path $kit 'Surveillance\Surveiller.ps1') -Destination $dest -Force
 if (Test-Path (Join-Path $kit 'config\autorises.txt')) { Copy-Item -LiteralPath (Join-Path $kit 'config\autorises.txt') -Destination (Join-Path $dest 'autorises.txt') -Force } else { Set-Content (Join-Path $dest 'autorises.txt') '# motifs autorises' }
 $cfg = [ordered]@{ Site = $site; Webhook = @($hook | Where-Object { $_ }); Email = $mail; HeartbeatJours = 7 }
@@ -53,6 +56,10 @@ $pri = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -Ru
 $set = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 Unregister-ScheduledTask -TaskName 'BLL Surveillance' -Confirm:$false -ErrorAction SilentlyContinue
 Register-ScheduledTask -TaskName 'BLL Surveillance' -Action $act -Trigger @($t1, $t2) -Principal $pri -Settings $set -Description 'Detecte les changements de securite et envoie une alerte' | Out-Null
+if (-not (Get-ScheduledTask -TaskName 'BLL Surveillance' -ErrorAction SilentlyContinue)) {
+    Write-Host 'ERREUR : la tache planifiee n''a pas pu etre creee. Surveillance NON installee.' -ForegroundColor Red
+    Read-Host 'Entree pour fermer' | Out-Null; exit 1
+}
 
 Write-Host 'Creation de la reference (30 secondes environ)...'
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script -Init

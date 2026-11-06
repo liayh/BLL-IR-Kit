@@ -33,7 +33,9 @@ function Get-Snapshot {
     foreach ($d in 'C:\ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp') { $st += @(Get-ChildItem -LiteralPath $d -File -Force | ForEach-Object { $_.FullName }) }
     foreach ($u in (Get-ChildItem 'C:\Users' -Directory -Force)) { $st += @(Get-ChildItem -LiteralPath (Join-Path $u.FullName 'AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup') -File -Force | ForEach-Object { $_.FullName }) }
     $s.dossier_demarrage = @($st)
-    $s.administrateur = @(Get-LocalGroupMember -Group (Get-LocalGroup -SID 'S-1-5-32-544').Name | ForEach-Object { $_.Name })
+    # $null si illisible (compte orphelin...) : la reference precedente est alors conservee, sans fausse alerte
+    $s.administrateur = $null
+    try { $s.administrateur = @(Get-LocalGroupMember -SID 'S-1-5-32-544' -ErrorAction Stop | ForEach-Object { [string]$_.Name }) } catch { }
     $s.utilisateur_actif = @(Get-LocalUser | Where-Object { $_.Enabled } | ForEach-Object { $_.Name })
     $tools = @()
     foreach ($k in 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*') { $tools += @(Get-ItemProperty -Path $k | Where-Object { $_.DisplayName -match $toolsRx } | ForEach-Object { 'Installe : ' + $_.DisplayName }) }
@@ -125,6 +127,11 @@ if ($Init -or -not $state) {
     Log 'Reference (baseline) creee.'
     Write-Host 'Reference creee : l''etat actuel est considere comme sain.'
     exit 0
+}
+
+if ($null -eq $snap['administrateur']) {
+    Log 'Membres du groupe Administrateurs illisibles : reference precedente conservee.'
+    $snap['administrateur'] = @($state.Base.administrateur)
 }
 
 $last = $now.AddHours(-6); try { $last = ([datetime]$state.DerniereExecutionUtc).ToUniversalTime() } catch { }

@@ -118,10 +118,9 @@ function Mod-Durcissement {
     } catch { }
 
     # Comptes
-    try {
-        $admins = @(Get-LocalGroupMember -Group (Get-LocalGroup -SID 'S-1-5-32-544').Name | ForEach-Object { $_.Name })
-        Add-Check 'Comptes' 'Administrateurs locaux : 3 comptes ou moins' ($admins.Count -le 3) ($admins -join ' ; ') 'Retirer les comptes administrateurs inutiles.' 'MOYEN'
-    } catch { }
+    $admins = Get-GroupMemberNames 'S-1-5-32-544'
+    if ($null -eq $admins) { Add-Check 'Comptes' 'Administrateurs locaux : 3 comptes ou moins' $null 'membres du groupe illisibles' }
+    else { Add-Check 'Comptes' 'Administrateurs locaux : 3 comptes ou moins' ($admins.Count -le 3) ($admins -join ' ; ') 'Retirer les comptes administrateurs inutiles.' 'MOYEN' }
     try {
         $users = @(Get-LocalUser)
         $b = $users | Where-Object { $_.SID -like '*-500' -and $_.Enabled }
