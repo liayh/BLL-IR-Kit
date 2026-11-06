@@ -1,0 +1,7 @@
+# Mots recherches dans les fichiers texte suspects (notes de rancon). Un par ligne.
+pay or leak
+bitcoin
+.onion
+your files
+decrypt
+ransom

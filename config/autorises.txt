@@ -1,0 +1,4 @@
+# Expressions regulieres (une par ligne) : les constats qui correspondent passent en INFO (autorise).
+# Exemples a adapter pour chaque pharmacie :
+# TeamViewer Host
+# instance-xxxxxx
