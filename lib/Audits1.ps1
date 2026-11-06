@@ -39,11 +39,21 @@ function Test-VersionLt {
 function Mod-Durcissement {
     $os = Get-CimInstance Win32_OperatingSystem
     $cap = [string]$os.Caption; $build = [int]$os.BuildNumber
-    $sup = $true; $why = ('{0} (build {1})' -f $cap, $build)
-    if ($cap -match 'Windows 10') { $sup = $false; $why += ' : fin de support le 14/10/2025 (sauf ESU)' }
-    elseif ($cap -match 'Server 20(03|08|12)|Windows (7|8)|Vista') { $sup = $false; $why += ' : version non supportee' }
-    Add-Check 'Systeme' 'Version de Windows encore supportee' $sup $why 'Migrer vers Windows 11 (ou souscrire aux mises a jour de securite etendues).' 'ELEVE'
-    if ($cap -match 'Windows 11' -and $build -lt 26100) { Add-Check 'Systeme' 'Version de fonctionnalite Windows 11 recente' $false ('build ' + $build) 'Installer la derniere mise a jour de fonctionnalite (24H2 ou plus).' 'FAIBLE' }
+    $ed = [string](Get-RegVal 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' 'EditionID' '')
+    $sup = $true; $why = ('{0} (build {1}, edition {2})' -f $cap, $build, $ed)
+    # Table de support a la date de la version 1.3.0 (novembre 2026) - a mettre a jour a chaque version du kit.
+    #  Windows 11 Famille/Pro : 25H2 (26200) minimum (24H2 fin de support 13/10/2026)
+    #  Windows 11 Entreprise/Education : 24H2 (26100) minimum
+    #  Windows 10 : fin de support 14/10/2025, sauf LTSC/IoT 2019 (17763) et 2021 (19044)
+    if ($cap -match 'Windows 10') {
+        if ($ed -match '(?i)EnterpriseS|IoTEnterpriseS|LTSC' -and $build -in 17763, 19044) { $why += ' : edition LTSC/IoT encore supportee' }
+        else { $sup = $false; $why += ' : fin de support le 14/10/2025 (sauf ESU)' }
+    } elseif ($cap -match 'Windows 11') {
+        $min = 26200; if ($ed -match '(?i)Enterprise|Education') { $min = 26100 }
+        if ($ed -match '(?i)EnterpriseS|IoTEnterpriseS') { $min = 22000 }
+        if ($build -lt $min) { $sup = $false; $why += (' : version de fonctionnalite hors support (minimum build ' + $min + ')') }
+    } elseif ($cap -match 'Server 20(03|08|12)|Windows (7|8)|Vista') { $sup = $false; $why += ' : version non supportee' }
+    Add-Check 'Systeme' 'Version de Windows encore supportee' $sup $why 'Installer la derniere version de Windows 11 (Parametres > Windows Update) ou migrer.' 'ELEVE'
 
     # SMB
     try {
@@ -72,18 +82,35 @@ function Mod-Durcissement {
     try { $tpm = Get-Tpm; Add-Check 'Systeme' 'TPM present et pret' ([bool]($tpm.TpmPresent -and $tpm.TpmReady)) ('Present=' + $tpm.TpmPresent + ' Pret=' + $tpm.TpmReady) 'Activer le TPM dans le BIOS.' 'FAIBLE' } catch { }
 
     # Antivirus / Defender
+    $mp = $null; try { $mp = Get-MpComputerStatus -ErrorAction Stop } catch { }
+    $isServer = ([int]$os.ProductType -ne 1)
     $avNames = @()
-    try { $avNames = @(Get-CimInstance -Namespace 'root/SecurityCenter2' -ClassName AntiVirusProduct | ForEach-Object { $_.displayName }) } catch { }
-    Add-Check 'Protection' 'Un antivirus est enregistre' ($avNames.Count -gt 0) ($avNames -join ', ') 'Installer/activer un antivirus.' 'ELEVE'
-    try {
-        $mp = Get-MpComputerStatus
-        Add-Check 'Protection' 'Defender : protection temps reel active' ([bool]$mp.RealTimeProtectionEnabled) ('RealTimeProtectionEnabled=' + $mp.RealTimeProtectionEnabled) 'Reactiver la protection en temps reel (ou verifier l''antivirus tiers).' 'ELEVE'
+    if (-not $isServer) {
+        try { $avNames = @(Get-CimInstance -Namespace 'root/SecurityCenter2' -ClassName AntiVirusProduct -ErrorAction Stop | ForEach-Object { $_.displayName }) } catch { }
+        Add-Check 'Protection' 'Un antivirus est enregistre' ($avNames.Count -gt 0) ($avNames -join ', ') 'Installer/activer un antivirus.' 'ELEVE'
+    } elseif ($mp -and $mp.AMServiceEnabled) {
+        Add-Check 'Protection' 'Un antivirus est actif (serveur)' $true 'Microsoft Defender actif'
+    } else {
+        # Windows Server : pas de Centre de securite ; un antivirus tiers ne peut pas etre detecte de facon fiable
+        Add-Check 'Protection' 'Un antivirus est actif (serveur)' $null 'Defender inactif : verifier manuellement l''antivirus du serveur'
+    }
+    # Defender en mode passif ou desactive au profit d'un antivirus tiers : ses reglages ne s'appliquent pas
+    $thirdParty = @($avNames | Where-Object { $_ -notmatch '(?i)Windows Defender|Microsoft Defender' })
+    $defActive = $mp -and ([string]$mp.AMRunningMode -in '', 'Normal') -and $thirdParty.Count -eq 0
+    if ($defActive) {
+        Add-Check 'Protection' 'Defender : protection temps reel active' ([bool]$mp.RealTimeProtectionEnabled) ('RealTimeProtectionEnabled=' + $mp.RealTimeProtectionEnabled) 'Reactiver la protection en temps reel.' 'ELEVE'
         Add-Check 'Protection' 'Defender : signatures a jour (moins de 7 jours)' ($mp.AntivirusSignatureAge -le 7) ('age ' + $mp.AntivirusSignatureAge + ' jours') 'Forcer la mise a jour des signatures.' 'MOYEN'
         Add-Check 'Protection' 'Defender : protection contre la falsification' ([bool]$mp.IsTamperProtected) ('IsTamperProtected=' + $mp.IsTamperProtected) 'Activer la protection contre la falsification.' 'MOYEN'
-        $pref = Get-MpPreference
-        $ex = @($pref.ExclusionPath) + @($pref.ExclusionProcess) + @($pref.ExclusionExtension) | Where-Object { $_ }
-        Add-Check 'Protection' 'Defender : aucune exclusion' ($ex.Count -eq 0) (($ex | Select-Object -First 10) -join ' ; ') 'Verifier chaque exclusion (les attaquants en ajoutent).' 'MOYEN'
-    } catch { Add-Check 'Protection' 'Defender : etat' $null 'non verifiable (antivirus tiers ?)' }
+        $pref = $null; try { $pref = Get-MpPreference -ErrorAction Stop } catch { }
+        if ($pref) {
+            # "N/A: Must be an administrator..." quand les exclusions sont masquees : ce n'est pas une exclusion
+            $ex = @(@($pref.ExclusionPath) + @($pref.ExclusionProcess) + @($pref.ExclusionExtension) | Where-Object { $_ -and $_ -notmatch '^N/A' })
+            Add-Check 'Protection' 'Defender : aucune exclusion' ($ex.Count -eq 0) (($ex | Select-Object -First 10) -join ' ; ') 'Verifier chaque exclusion (les attaquants en ajoutent).' 'MOYEN'
+        }
+    } else {
+        $why = 'Defender inactif'; if ($thirdParty.Count -gt 0) { $why = 'antivirus tiers : ' + ($thirdParty -join ', ') } elseif ($mp) { $why = 'Defender en mode ' + $mp.AMRunningMode }
+        Add-Check 'Protection' 'Defender : etat' $null ($why + ' (reglages Defender non evalues ; verifier la console de l''antivirus)')
+    }
     try {
         $prof = @(Get-NetFirewallProfile)
         $off = @($prof | Where-Object { -not $_.Enabled } | ForEach-Object { $_.Name })
@@ -103,7 +130,8 @@ function Mod-Durcissement {
     Add-Check 'Reseau' 'LLMNR desactive' ($ll -eq 0) ('EnableMulticast=' + $ll) 'Desactiver LLMNR par GPO.' 'FAIBLE'
     try {
         $v2 = Get-WindowsOptionalFeature -Online -FeatureName MicrosoftWindowsPowerShellV2Root
-        Add-Check 'Protection' 'PowerShell 2.0 desactive' ($v2.State -eq 'Disabled') ('etat ' + $v2.State) 'Disable-WindowsOptionalFeature -Online -FeatureName MicrosoftWindowsPowerShellV2Root' 'FAIBLE'
+        # retire de Windows 11 24H2 / Server 2025 : composant absent = conforme
+        Add-Check 'Protection' 'PowerShell 2.0 desactive' (($null -eq $v2) -or ($v2.State -ne 'Enabled')) $(if ($v2) { 'etat ' + $v2.State } else { 'composant absent' }) 'Disable-WindowsOptionalFeature -Online -FeatureName MicrosoftWindowsPowerShellV2Root' 'FAIBLE'
     } catch { }
 
     # Journalisation
@@ -132,7 +160,12 @@ function Mod-Durcissement {
         $old = @($users | Where-Object { $_.Enabled -and $_.LastLogon -and $_.LastLogon -lt (Get-Date).AddDays(-90) } | ForEach-Object { $_.Name })
         Add-Check 'Comptes' 'Aucun compte actif inutilise depuis 90 jours' ($old.Count -eq 0) ($old -join ' ; ') 'Desactiver les comptes inutilises.' 'FAIBLE'
     } catch { }
-    $laps = (Test-Path 'HKLM:\SOFTWARE\Microsoft\Policies\Windows\LAPS') -or (Test-Path 'HKLM:\SOFTWARE\Policies\Microsoft Services\AdmPwd') -or (Test-Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\LAPS')
+    # Windows LAPS : strategie Intune/CSP, GPO ou configuration locale (BackupDirectory 1 = Entra, 2 = AD) ; LAPS historique : AdmPwdEnabled
+    $laps = $false
+    foreach ($k in 'HKLM:\SOFTWARE\Microsoft\Policies\LAPS', 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\LAPS', 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\LAPS\Config') {
+        if ([int](Get-RegVal $k 'BackupDirectory' 0) -in 1, 2) { $laps = $true }
+    }
+    if ([int](Get-RegVal 'HKLM:\SOFTWARE\Policies\Microsoft Services\AdmPwd' 'AdmPwdEnabled' 0) -eq 1) { $laps = $true }
     Add-Check 'Comptes' 'Mot de passe administrateur local gere (LAPS)' $laps $(if ($laps) { 'politique LAPS presente' } else { 'aucune politique LAPS' }) 'Deployer Windows LAPS (Intune ou GPO).' 'FAIBLE'
 
     # Outils d'acces distant installes et non autorises

@@ -16,7 +16,10 @@ function Log { param([string]$m) try { Add-Content -LiteralPath $logPath -Value 
 $cfg = $null
 if (Test-Path -LiteralPath $cfgPath) { try { $cfg = Get-Content -LiteralPath $cfgPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { } }
 $site = $env:COMPUTERNAME; if ($cfg -and $cfg.Site) { $site = [string]$cfg.Site + ' / ' + $env:COMPUTERNAME }
-$allow = @(); if (Test-Path -LiteralPath $allowPath) { $allow = @(Get-Content -LiteralPath $allowPath -Encoding UTF8 | ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith('#') }) }
+# meme format que la collecte : un motif par ligne, "# commentaire" en fin de ligne ignore
+$allow = @(); if (Test-Path -LiteralPath $allowPath) { $allow = @(Get-Content -LiteralPath $allowPath -Encoding UTF8 | ForEach-Object { $t = $_.Trim(); $ix = $t.IndexOf(' #'); if ($ix -gt 0) { $t = $t.Substring(0, $ix).Trim() }; $t } | Where-Object { $_ -and -not $_.StartsWith('#') }) }
+# categories critiques : jamais masquees par autorises.txt (apres un changement legitime : Surveiller.ps1 -Init)
+$noAllow = 'protection', 'administrateur', 'exclusion_defender', 'portproxy', 'hosts', 'rdp'
 
 $toolsRx = '(?i)anydesk|teamviewer|splashtop|srserver|screenconnect|connectwise|rustdesk|ultraviewer|supremo|ammyy|tightvnc|ultravnc|realvnc|winvnc|radmin|logmein|gotoassist|meshagent|meshcentral|atera|ninjarmm|action1|zoho assist|dwservice|dwagent|nomachine|remoting_host|tailscale|zerotier|ngrok|cloudflared|frpc|chisel|psexec|paexec|mimikatz|lazagne|rclone|megasync|cobaltstrike|sliver'
 
@@ -26,7 +29,7 @@ function Get-Snapshot {
     $s.tache = @(Get-ScheduledTask | Where-Object { $_.TaskPath -notmatch '^\\Microsoft\\' } | ForEach-Object { $a = ($_.Actions | ForEach-Object { ($_.Execute + ' ' + $_.Arguments).Trim() }) -join ' ; '; $_.TaskPath + $_.TaskName + ' | ' + $a })
     $run = @()
     $keys = @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run', 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run')
-    foreach ($sid in (Get-ChildItem Registry::HKEY_USERS | Where-Object { $_.PSChildName -match '^S-1-5-21-' -and $_.PSChildName -notmatch '_Classes$' })) { $keys += ('Registry::HKEY_USERS\' + $sid.PSChildName + '\Software\Microsoft\Windows\CurrentVersion\Run') }
+    foreach ($sid in (Get-ChildItem Registry::HKEY_USERS | Where-Object { $_.PSChildName -match '^S-1-(5-21|12-1)-[0-9-]+$' })) { $keys += ('Registry::HKEY_USERS\' + $sid.PSChildName + '\Software\Microsoft\Windows\CurrentVersion\Run') }
     foreach ($k in $keys) { $p = Get-ItemProperty -LiteralPath $k; if ($p) { foreach ($n in $p.PSObject.Properties) { if ($n.Name -notmatch '^PS') { $run += ($k -replace '^.*\\(S-1-5-21-[^\\]+)\\.*$', '$1' -replace 'HKLM:\\SOFTWARE\\', '') + ' | ' + $n.Name + ' = ' + $n.Value } } } }
     $s.demarrage_registre = @($run)
     $st = @()
@@ -113,8 +116,18 @@ if ($Test) {
 }
 
 $snap = Get-Snapshot
-$state = $null
-if (Test-Path -LiteralPath $statePath) { try { $state = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { } }
+$state = $null; $stateBroken = $false
+if (Test-Path -LiteralPath $statePath) {
+    try { $state = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { }
+    if (-not $state -or -not $state.Base) { $state = $null; $stateBroken = $true }
+}
+function Save-State {
+    # ecriture atomique : fichier temporaire puis remplacement (un arret pendant l'ecriture ne corrompt pas la reference)
+    param($Obj)
+    $tmp = $statePath + '.tmp'
+    ($Obj | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $tmp -Encoding UTF8
+    Move-Item -LiteralPath $tmp -Destination $statePath -Force
+}
 
 $tvFile = 'C:\Program Files\TeamViewer\Connections_incoming.txt'
 if (-not (Test-Path -LiteralPath $tvFile)) { $tvFile = 'C:\Program Files (x86)\TeamViewer\Connections_incoming.txt' }
@@ -123,8 +136,12 @@ $tvLines = 0; if (Test-Path -LiteralPath $tvFile) { $tvLines = @(Get-Content -Li
 # ------------------------------------------------------------------ init
 if ($Init -or -not $state) {
     $o = [ordered]@{ Base = $snap; DerniereExecutionUtc = $now.ToString('o'); TvLignes = $tvLines; DernierRythme = $now.ToString('o') }
-    ($o | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $statePath -Encoding UTF8
+    Save-State $o
     Log 'Reference (baseline) creee.'
+    if ($stateBroken -and -not $Init) {
+        # reference illisible ou effacee : l'etat actuel est repris SANS controle -> on previent
+        $null = Send-Alert ('[BLL] ALERTE surveillance - ' + $site) ('La reference de surveillance etait illisible ou absente ; elle a ete recreee le ' + $now.ToString('yyyy-MM-dd HH:mm') + ' UTC a partir de l''etat actuel. Un changement survenu depuis le dernier controle a pu passer inapercu : verifier le poste.')
+    }
     Write-Host 'Reference creee : l''etat actuel est considere comme sain.'
     exit 0
 }
@@ -143,7 +160,7 @@ foreach ($cat in $snap.Keys) {
     if ($state.Base.PSObject.Properties.Name -notcontains $cat) { continue }   # nouvelle categorie (mise a jour) : apprise sans alerte
     $baseItems = @($state.Base.$cat)
     $cur = @($snap[$cat])
-    $new = @($cur | Where-Object { $_ -and ($baseItems -notcontains $_) -and -not (Is-Allowed $_) })
+    $new = @($cur | Where-Object { $_ -and ($baseItems -notcontains $_) -and (($noAllow -contains $cat) -or -not (Is-Allowed $_)) })
     if ($cat -eq 'protection') { $new = @($new | Where-Object { $_ -match 'DESACTIVE' }) }
     if ($cat -eq 'rdp' -or $cat -eq 'hosts') { if ($new.Count -gt 0) { $alerts.Add([pscustomobject]@{ Sev = $sevMap[$cat]; Txt = ($label[$cat] + ' : ' + ($new -join ' ; ')) }) } ; continue }
     foreach ($n in ($new | Select-Object -First 15)) { $alerts.Add([pscustomobject]@{ Sev = $sevMap[$cat]; Txt = ($label[$cat] + ' : ' + $n) }) }
@@ -156,10 +173,15 @@ function Ev { param($f) try { Get-WinEvent -FilterHashtable $f -MaxEvents 200 -E
 foreach ($e in (Ev @{ LogName = 'Security'; Id = 1102; StartTime = $since })) { $alerts.Add([pscustomobject]@{ Sev = 'ELEVE'; Txt = ('Journal Securite efface le ' + $e.TimeCreated.ToUniversalTime().ToString('yyyy-MM-dd HH:mm') + ' UTC') }) }
 foreach ($e in (Ev @{ LogName = 'System'; Id = 104; ProviderName = 'Microsoft-Windows-Eventlog'; StartTime = $since })) { $alerts.Add([pscustomobject]@{ Sev = 'ELEVE'; Txt = ('Journal Windows efface le ' + $e.TimeCreated.ToUniversalTime().ToString('yyyy-MM-dd HH:mm') + ' UTC') }) }
 foreach ($e in (Ev @{ LogName = 'Security'; Id = 4720; StartTime = $since })) { $alerts.Add([pscustomobject]@{ Sev = 'ELEVE'; Txt = ('Compte cree le ' + $e.TimeCreated.ToUniversalTime().ToString('yyyy-MM-dd HH:mm') + ' UTC') }) }
-foreach ($e in (Ev @{ LogName = 'Security'; Id = 4624; StartTime = $since })) {
+# filtre cote Windows sur le type 10 (RDP) : sinon les 200 ouvertures de session les plus recentes (taches, services)
+# masqueraient une session RDP plus ancienne de la periode
+$ms = [int64][Math]::Max(60000, ((Get-Date) - $since).TotalMilliseconds)
+$rdpEv = @(); try { $rdpEv = @(Get-WinEvent -LogName Security -FilterXPath ("*[System[EventID=4624 and TimeCreated[timediff(@SystemTime) <= $ms]]] and *[EventData[Data[@Name='LogonType']='10']]") -MaxEvents 500 -ErrorAction Stop) } catch { }
+foreach ($e in $rdpEv) {
     try {
         $x = [xml]$e.ToXml(); $d = @{}; foreach ($dd in $x.Event.EventData.Data) { $d[$dd.Name] = $dd.'#text' }
-        if ($d['LogonType'] -eq '10' -and $d['IpAddress'] -notmatch '^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|127\.|::1|-$|\s*$)') {
+        $ipx = ([string]$d['IpAddress']) -replace '^::ffff:', ''
+        if ($d['LogonType'] -eq '10' -and $ipx -notmatch '^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|127\.|169\.254\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.|::1|f[cd][0-9a-f]{2}:|fe80:|-$|\s*$)') {
             $alerts.Add([pscustomobject]@{ Sev = 'ELEVE'; Txt = ('Session RDP depuis une IP publique ' + $d['IpAddress'] + ' (compte ' + $d['TargetUserName'] + ') le ' + $e.TimeCreated.ToUniversalTime().ToString('yyyy-MM-dd HH:mm') + ' UTC') })
         }
     } catch { }
@@ -215,5 +237,5 @@ else {
     Log 'Alerte NON transmise (webhook/mail en echec) : elle sera renvoyee au prochain controle.'
     $o = [ordered]@{ Base = $state.Base; DerniereExecutionUtc = [string]$state.DerniereExecutionUtc; TvLignes = [int]$state.TvLignes; DernierRythme = $hb }
 }
-($o | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $statePath -Encoding UTF8
+Save-State $o
 Log ('Controle termine : {0} changement(s).' -f $sorted.Count)

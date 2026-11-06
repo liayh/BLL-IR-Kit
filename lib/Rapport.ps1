@@ -2,6 +2,8 @@
 
 function Mod-IOC {
     $iocs = @($script:IocList | ForEach-Object { $_.Valeur })
+    # les identifiants observes (ID AnyDesk, IP...) sont enregistres meme sans indicateur a rechercher
+    $null = Save-Csv $script:IocSeen 'IOC_observes_sur_ce_poste.csv' '08_synthese'
     if ($iocs.Count -eq 0) { Say '   Aucun indicateur dans config\ioc.txt'; return }
     $files = New-Object System.Collections.Generic.List[string]
     foreach ($root in $script:Raw, $script:Out) {
@@ -13,7 +15,6 @@ function Mod-IOC {
     Say ("   Recherche de {0} indicateur(s) dans {1} fichiers collectes" -f $iocs.Count, $files.Count)
     $hits = @(Find-IocInFiles -Iocs $iocs -Files $files.ToArray() -MaxHitsPerIoc 50)
     $null = Save-Csv $hits 'ioc_correspondances.csv' '08_synthese'
-    $null = Save-Csv $script:IocSeen 'IOC_observes_sur_ce_poste.csv' '08_synthese'
     $byIoc = $hits | Group-Object Ioc
     foreach ($g in $byIoc) {
         $first = $g.Group | Select-Object -First 1

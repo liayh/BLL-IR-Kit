@@ -7,10 +7,14 @@ function Mod-Sauvegardes {
     $bkRx = '(?i)veeam|acronis|macrium|iperius|cobian|duplicati|backblaze|synology active backup|hyper backup|qnap|nakivo|altaro|hornetsecurity|datto|carbonite|crashplan|cloudberry|msp360|aomei|easeus todo|paragon|nortonghost|duplicacy|restic|rclone|freefilesync|syncback|veritas|commvault|sauvegarde|backup exec|windows server backup|safedeposit|idrive|spideroak|ottomatik'
     $sw = @(Get-InstalledSoftware | Where-Object { $_.Nom -match $bkRx })
     foreach ($s in $sw) { $rows.Add([pscustomobject]@{ Type = 'Logiciel'; Nom = $s.Nom; Detail = $s.Version }) }
-    $svcs = @(Get-Service | Where-Object { ($_.Name + ' ' + $_.DisplayName) -match $bkRx })
+    # services Windows integres (presents partout ; "Sauvegarde Windows" sur un Windows en francais) : ne prouvent rien
+    $winBk = 'wbengine', 'SDRSVC', 'fhsvc', 'swprv', 'VSS'
+    $svcs = @(Get-Service | Where-Object { $_.Name -notin $winBk -and ($_.Name + ' ' + $_.DisplayName) -match $bkRx })
     foreach ($s in $svcs) { $rows.Add([pscustomobject]@{ Type = 'Service'; Nom = $s.DisplayName; Detail = ([string]$s.Status + ' / ' + [string]$s.StartType) }) }
-    $runningSvc = @($svcs | Where-Object { $_.Status -eq 'Running' })
-    Add-Check 'Sauvegardes' 'Un logiciel ou service de sauvegarde est installe' (($sw.Count + $svcs.Count) -gt 0) (($sw | ForEach-Object { $_.Nom }) -join ' ; ') 'Verifier que ce poste (ou son serveur) est bien sauvegarde.' 'ELEVE'
+    $wbOk = $false
+    try { $wbOk = [bool]((& wbadmin.exe get versions 2>$null) -match '(?i)(Backup time|Heure de la sauvegarde)') } catch { }
+    $what = @(@($sw | ForEach-Object { $_.Nom }) + @($svcs | ForEach-Object { $_.DisplayName }) + @($(if ($wbOk) { 'Sauvegarde Windows (wbadmin, versions presentes)' })) | Where-Object { $_ } | Sort-Object -Unique)
+    Add-Check 'Sauvegardes' 'Un logiciel ou service de sauvegarde est installe' ($what.Count -gt 0) ($what -join ' ; ') 'Verifier que ce poste (ou son serveur) est bien sauvegarde.' 'ELEVE'
 
     # 2. Taches planifiees de sauvegarde
     $okTask = $false; $taskTxt = @()
@@ -68,19 +72,31 @@ function Mod-Sauvegardes {
     if ($cfg.Count -eq 0) { Add-Check 'Sauvegardes' 'Destinations de sauvegarde declarees (config\sauvegardes.txt)' $null 'aucune declaree : fraicheur non verifiee' }
 
     # 5. Resistance au rancongiciel : destinations accessibles en ecriture depuis le poste
+    # Lecteurs reseau mappes par les utilisateurs (lus dans leur registre : la session administrateur ne les voit pas).
+    # Lecture seule : aucun fichier de test n'est ecrit sur les partages.
     $risk = New-Object System.Collections.Generic.List[string]
     try {
-        Get-PSDrive -PSProvider FileSystem | Where-Object { $_.DisplayRoot -like '\\*' } | ForEach-Object {
-            $t = Join-Path ($_.Name + ':\') ('.bll_w_' + [guid]::NewGuid().ToString('N').Substring(0, 6))
-            try { New-Item -ItemType File -Path $t -ErrorAction Stop | Out-Null; Remove-Item -LiteralPath $t -Force; $risk.Add($_.Name + ': (' + $_.DisplayRoot + ')') } catch { }
+        foreach ($sid in [Microsoft.Win32.Registry]::Users.GetSubKeyNames() | Where-Object { $_ -match $script:UserSidRx }) {
+            Get-ChildItem ("Registry::HKEY_USERS\$sid\Network") -ErrorAction SilentlyContinue | ForEach-Object {
+                $rpth = (Get-ItemProperty -LiteralPath $_.PSPath -ErrorAction SilentlyContinue).RemotePath
+                if ($rpth) { $e = ($_.PSChildName.ToUpper() + ': (' + $rpth + ')'); if (-not $risk.Contains($e)) { $risk.Add($e) } }
+            }
         }
+        Get-PSDrive -PSProvider FileSystem | Where-Object { $_.DisplayRoot -like '\\*' } | ForEach-Object { $e = ($_.Name.ToUpper() + ': (' + $_.DisplayRoot + ')'); if (-not $risk.Contains($e)) { $risk.Add($e) } }
     } catch { }
-    $removable = @()
-    try { $removable = @(Get-Volume | Where-Object { $_.DriveType -eq 'Removable' -and $_.DriveLetter } | ForEach-Object { [string]$_.DriveLetter + ':' }) } catch { }
-    foreach ($r in $risk) { $rows.Add([pscustomobject]@{ Type = 'Lecteur reseau accessible en ecriture'; Nom = $r; Detail = 'un rancongiciel chiffrerait aussi ce lecteur' }) }
-    foreach ($r in $removable) { $rows.Add([pscustomobject]@{ Type = 'Disque amovible connecte'; Nom = $r; Detail = 'a deconnecter apres sauvegarde' }) }
-    Add-Check 'Sauvegardes' 'Aucun lecteur reseau mappe accessible en ecriture (cible de rancongiciel)' ($risk.Count -eq 0) ($risk -join ' ; ') 'Garder au moins une copie hors ligne ou immuable (compte dedie, versions, cloud avec verrouillage).' 'MOYEN'
-    Add-Check 'Sauvegardes' 'Aucun disque de sauvegarde amovible laisse branche en permanence' ($removable.Count -eq 0) ($removable -join ' ; ') 'Deconnecter le disque apres la sauvegarde ou alterner deux disques.' 'MOYEN'
+    # Disques USB (disques durs USB = type "Fixed", cles = "Removable"), hors support du kit lui-meme
+    $usb = @()
+    $kitDrive = ''; try { $kitDrive = ([IO.Path]::GetPathRoot($script:KitRoot)).Substring(0, 1).ToUpper() } catch { }
+    try {
+        $usb = @(Get-Disk -ErrorAction Stop | Where-Object { $_.BusType -eq 'USB' } | Get-Partition -ErrorAction SilentlyContinue |
+            Where-Object { $_.DriveLetter -and [string]$_.DriveLetter -ne $kitDrive } | ForEach-Object { [string]$_.DriveLetter + ':' } | Sort-Object -Unique)
+    } catch {
+        try { $usb = @(Get-Volume | Where-Object { $_.DriveType -eq 'Removable' -and $_.DriveLetter -and [string]$_.DriveLetter -ne $kitDrive } | ForEach-Object { [string]$_.DriveLetter + ':' }) } catch { }
+    }
+    foreach ($r in $risk) { $rows.Add([pscustomobject]@{ Type = 'Lecteur reseau mappe'; Nom = $r; Detail = 'si accessible en ecriture, un rancongiciel le chiffrerait aussi' }) }
+    foreach ($r in $usb) { $rows.Add([pscustomobject]@{ Type = 'Disque USB connecte'; Nom = $r; Detail = 'a deconnecter apres sauvegarde' }) }
+    Add-Check 'Sauvegardes' 'Aucun lecteur reseau mappe en permanence (cible de rancongiciel)' ($risk.Count -eq 0) ($risk -join ' ; ') 'Verifier qu''aucune sauvegarde ne se trouve sur ces lecteurs ; garder au moins une copie hors ligne ou immuable.' 'MOYEN'
+    Add-Check 'Sauvegardes' 'Aucun disque USB laisse branche en permanence' ($usb.Count -eq 0) ($usb -join ' ; ') 'Deconnecter le disque apres la sauvegarde ou alterner deux disques.' 'MOYEN'
     $null = Save-Csv $rows 'inventaire_sauvegardes.csv' '03_sauvegardes'
 }
 
@@ -99,8 +115,11 @@ function Mod-Partages {
         $ses = @(Get-SmbSession | Select-Object ClientComputerName, ClientUserName, NumOpens, SecondsExists)
         $null = Save-Csv $ses 'sessions_smb_entrantes.csv' '04_partages_donnees'
     } catch { Add-Check 'Partages' 'Partages SMB' $null 'non verifiable' }
-    $ag = Get-RegVal 'HKLM:\SYSTEM\CurrentControlSet\Services\LanmanWorkstation\Parameters' 'AllowInsecureGuestAuth' 0
-    Add-Check 'Partages' 'Acces invite non authentifie aux partages desactive' ($ag -ne 1) ('AllowInsecureGuestAuth=' + $ag) 'Mettre AllowInsecureGuestAuth a 0.' 'MOYEN'
+    # la strategie (GPO) l'emporte sur le parametre du service ; absente partout = valeur par defaut de l'edition
+    $ag = Get-RegVal 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\LanmanWorkstation' 'AllowInsecureGuestAuth' $null
+    if ($null -eq $ag) { $ag = Get-RegVal 'HKLM:\SYSTEM\CurrentControlSet\Services\LanmanWorkstation\Parameters' 'AllowInsecureGuestAuth' $null }
+    if ($null -eq $ag) { Add-Check 'Partages' 'Acces invite non authentifie aux partages desactive' $null 'non configure (valeur par defaut de Windows)' }
+    else { Add-Check 'Partages' 'Acces invite non authentifie aux partages desactive' ($ag -ne 1) ('AllowInsecureGuestAuth=' + $ag) 'Mettre AllowInsecureGuestAuth a 0 (strategie de groupe).' 'MOYEN' }
 
     # Fichiers sensibles laisses dans des dossiers a risque
     $rx = New-Object System.Collections.Generic.List[string]
@@ -186,7 +205,8 @@ function Get-UpnpMappings {
     param([string]$Location)
     $maps = New-Object System.Collections.Generic.List[object]
     try {
-        $x = [xml](Invoke-WebRequest -Uri $Location -UseBasicParsing -TimeoutSec 5).Content
+        # -MaximumRedirection 0 : un equipement du reseau ne peut pas rediriger la requete vers Internet
+        $x = [xml](Invoke-WebRequest -Uri $Location -UseBasicParsing -TimeoutSec 5 -MaximumRedirection 0 -ErrorAction Stop).Content
         $ns = New-Object Xml.XmlNamespaceManager($x.NameTable); $ns.AddNamespace('d', 'urn:schemas-upnp-org:device-1-0')
         $svc = $x.SelectNodes('//d:service', $ns) | Where-Object { $_.serviceType -match 'WANIPConnection|WANPPPConnection' } | Select-Object -First 1
         if (-not $svc) { return $maps }
@@ -197,7 +217,7 @@ function Get-UpnpMappings {
         for ($i = 0; $i -lt 60; $i++) {
             $body = '<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body><u:GetGenericPortMappingEntry xmlns:u="' + $svc.serviceType + '"><NewPortMappingIndex>' + $i + '</NewPortMappingIndex></u:GetGenericPortMappingEntry></s:Body></s:Envelope>'
             try {
-                $r = Invoke-WebRequest -Uri $ctl -Method Post -Body $body -UseBasicParsing -TimeoutSec 5 -ContentType 'text/xml; charset="utf-8"' -Headers @{ SOAPAction = ('"' + $svc.serviceType + '#GetGenericPortMappingEntry"') }
+                $r = Invoke-WebRequest -Uri $ctl -Method Post -Body $body -UseBasicParsing -TimeoutSec 5 -MaximumRedirection 0 -ErrorAction Stop -ContentType 'text/xml; charset="utf-8"' -Headers @{ SOAPAction = ('"' + $svc.serviceType + '#GetGenericPortMappingEntry"') }
                 $m = [xml]$r.Content
                 $e = $m.GetElementsByTagName('NewExternalPort')[0].InnerText
                 $maps.Add([pscustomobject]@{ PortExterne = $e; Protocole = $m.GetElementsByTagName('NewProtocol')[0].InnerText; VersIp = $m.GetElementsByTagName('NewInternalClient')[0].InnerText; PortInterne = $m.GetElementsByTagName('NewInternalPort')[0].InnerText; Description = $m.GetElementsByTagName('NewPortMappingDescription')[0].InnerText })
@@ -253,7 +273,7 @@ function Mod-ReseauLan {
         if ($pp -contains 21) { Add-Check 'Reseau local' ('FTP ferme sur ' + $ip) $false ($type + ' ' + $dns[$ip]) 'Desactiver FTP ou le remplacer par SFTP.' 'MOYEN' }
         if ($pp -contains 5900) { Add-Check 'Reseau local' ('VNC ferme sur ' + $ip) $false ($type + ' ' + $dns[$ip]) 'Verifier le mot de passe VNC ou desinstaller.' 'MOYEN' }
         if (($pp -contains 1433 -or $pp -contains 3306) -and $type -ne 'Passerelle / box') { Add-Check 'Reseau local' ('Base de donnees non exposee sur ' + $ip) $false ('ports ' + ($pp -join ',')) 'Limiter l''acces au serveur applicatif (pare-feu hote).' 'FAIBLE' }
-        if ($type -like 'Camera*') { Add-Check 'Reseau local' ('Camera/NVR ' + $ip + ' : mot de passe par defaut a verifier') $false ('ports ' + ($pp -join ',')) 'Verifier : mot de passe fort, firmware a jour, aucune redirection de port ou UPnP vers Internet, reseau/VLAN dedie.' 'FAIBLE' }
+        if ($type -like 'Camera*') { Add-Check 'Reseau local' ('Camera/NVR ' + $ip + ' : mot de passe et firmware a verifier manuellement') $null ('ports ' + ($pp -join ',') + ' - verifier : mot de passe fort, firmware a jour, aucune redirection vers Internet, reseau dedie') }
     }
     $rdp = @($devs | Where-Object { $_.PortsOuverts -match '(^|,)3389(,|$)' })
     if ($rdp.Count -gt 0) { Add-Check 'Reseau local' 'RDP ouvert sur un minimum d''equipements' ($rdp.Count -le 1) (($rdp | ForEach-Object { $_.Ip }) -join ', ') 'Fermer RDP sur les postes qui n''en ont pas besoin.' 'MOYEN' }
@@ -288,8 +308,16 @@ function HtmlE { param($t) return [System.Net.WebUtility]::HtmlEncode([string]$t
 function Build-RapportAudit {
     $ok = @($script:Checks | Where-Object { $_.Etat -eq 'OK' }); $ko = @($script:Checks | Where-Object { $_.Etat -eq 'ECART' }); $na = @($script:Checks | Where-Object { $_.Etat -eq 'N/A' })
     $wOk = 0; foreach ($c in $ok) { $wOk += $c.Poids }; $wKo = 0; foreach ($c in $ko) { $wKo += $c.Poids }
-    $score = 100; if (($wOk + $wKo) -gt 0) { $score = [int](100 * $wOk / ($wOk + $wKo)) }
-    $note = 'A'; if ($score -lt 90) { $note = 'B' }; if ($score -lt 75) { $note = 'C' }; if ($score -lt 60) { $note = 'D' }; if ($score -lt 40) { $note = 'E' }
+    # pas de score sans controles evalues (un audit qui n'a rien pu lire ne doit pas afficher 100/100)
+    $score = '--'; $note = '?'
+    if (($wOk + $wKo) -gt 0) {
+        $score = [int](100 * $wOk / ($wOk + $wKo))
+        $note = 'A'; if ($score -lt 90) { $note = 'B' }; if ($score -lt 75) { $note = 'C' }; if ($score -lt 60) { $note = 'D' }; if ($score -lt 40) { $note = 'E' }
+    }
+    $script:ScoreWarn = ''
+    $nAll = $ok.Count + $ko.Count + $na.Count
+    if ($nAll -gt 0 -and ($na.Count / $nAll) -gt 0.3) { $script:ScoreWarn = ('Attention : ' + $na.Count + ' controles sur ' + $nAll + ' non verifiables ; score peu representatif.') }
+    if ($script:Errors.Count -gt 0) { $script:ScoreWarn = ($script:ScoreWarn + ' Modules en erreur : ' + $script:Errors.Count + ' (voir la fin du rapport).').Trim() }
     $script:Score = $score; $script:Note = $note
     $null = Save-Csv ($script:Checks | Sort-Object Categorie, Etat) 'controles.csv' ''
     $order = @{ 'ELEVE' = 0; 'MOYEN' = 1; 'FAIBLE' = 2 }
@@ -297,7 +325,9 @@ function Build-RapportAudit {
 
     $r = New-Object System.Collections.Generic.List[string]
     $r.Add('BLL Audit v' + $script:KitVersion + ' - ' + $env:COMPUTERNAME); $r.Add('=' * 60)
-    $r.Add(('Score : {0}/100 (note {1}) - {2} conformes, {3} ecarts, {4} non verifiables' -f $score, $note, $ok.Count, $ko.Count, $na.Count)); $r.Add('')
+    $r.Add(('Score : {0}/100 (note {1}) - {2} conformes, {3} ecarts, {4} non verifiables' -f $score, $note, $ok.Count, $ko.Count, $na.Count))
+    if ($script:ScoreWarn) { $r.Add($script:ScoreWarn) }
+    $r.Add('')
     foreach ($k in $kos) { $r.Add(('[{0}] {1} - {2} : {3}' -f $k.Gravite, $k.Categorie, $k.Controle, $k.Valeur)); $r.Add('        -> ' + $k.Recommandation) }
     if ($script:Errors.Count -gt 0) { $r.Add(''); $r.Add('MODULES EN ERREUR :'); foreach ($e in $script:Errors) { $r.Add(' - ' + $e) } }
     Save-Text $r.ToArray() 'RESUME_AUDIT.txt' ''
@@ -306,6 +336,7 @@ function Build-RapportAudit {
     [void]$sb.Append('<!DOCTYPE html><html lang="fr"><head><meta charset="utf-8"><title>Audit ' + (HtmlE $env:COMPUTERNAME) + '</title><style>body{font-family:Segoe UI,Arial,sans-serif;margin:24px;color:#222}h1{font-size:22px}h2{font-size:17px;margin-top:26px;border-bottom:1px solid #ccc;padding-bottom:4px}table{border-collapse:collapse;width:100%;font-size:12.5px}th,td{border:1px solid #ddd;padding:4px 6px;text-align:left;vertical-align:top;word-break:break-word}th{background:#f3f3f3}.ELEVE{background:#fde2e2}.MOYEN{background:#fff0d6}.FAIBLE{background:#fffbe0}.OK{background:#e6f5e6}.NA{background:#f1f1f1}.score{font-size:40px;font-weight:700}</style></head><body>')
     [void]$sb.Append('<h1>Audit de securite - ' + (HtmlE $env:COMPUTERNAME) + '</h1><p>' + (U (Get-Date)) + ' UTC - BLL IR-Kit v' + $script:KitVersion + '</p>')
     [void]$sb.Append('<p><span class="score">' + $score + '/100</span> &nbsp; note <b>' + $note + '</b> &nbsp; ' + $ok.Count + ' conformes - ' + $ko.Count + ' ecarts - ' + $na.Count + ' non verifiables</p>')
+    if ($script:ScoreWarn) { [void]$sb.Append('<p style="color:#b00"><b>' + (HtmlE $script:ScoreWarn) + '</b></p>') }
     [void]$sb.Append('<p><em>Audit en lecture seule. Le score ponderee par gravite est un indicateur de suivi, pas une certification.</em></p>')
     [void]$sb.Append('<h2>Par categorie</h2><table><tr><th>Categorie</th><th>Conformes</th><th>Ecarts</th></tr>')
     foreach ($g in ($script:Checks | Group-Object Categorie | Sort-Object Name)) { [void]$sb.Append('<tr><td>' + (HtmlE $g.Name) + '</td><td>' + @($g.Group | Where-Object { $_.Etat -eq 'OK' }).Count + '</td><td>' + @($g.Group | Where-Object { $_.Etat -eq 'ECART' }).Count + '</td></tr>') }

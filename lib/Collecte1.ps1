@@ -342,7 +342,8 @@ function Mod-AccesDistant {
     # Historique PowerShell des utilisateurs
     foreach ($pr in $profiles) {
         $h = Join-Path $pr.FullName 'AppData\Roaming\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt'
-        if (Test-Path -LiteralPath $h) { Add-CopyJob -Source $h -Dest ('powershell\' + $pr.Name) }
+        # l'historique contient souvent des mots de passe / jetons tapes en clair : jamais dans l'archive transmissible
+        if (Test-Path -LiteralPath $h) { Add-CopyJob -Source $h -Dest ('powershell\' + $pr.Name) -Sensible }
     }
 }
 
@@ -387,7 +388,7 @@ function Mod-Persistance {
     'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run', 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce',
     'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\RunOnce',
     'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run' | ForEach-Object { $runKeys.Add($_) }
-    foreach ($sid in [Microsoft.Win32.Registry]::Users.GetSubKeyNames() | Where-Object { $_ -notmatch '_Classes$' -and $_ -match '^S-1-5-21' }) {
+    foreach ($sid in [Microsoft.Win32.Registry]::Users.GetSubKeyNames() | Where-Object { $_ -match $script:UserSidRx }) {
         foreach ($sub in 'Run', 'RunOnce') { $runKeys.Add("Registry::HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\$sub") }
         $runKeys.Add("Registry::HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run")
     }
@@ -408,6 +409,10 @@ function Mod-Persistance {
         }
     }
     $null = Save-Csv $runOut 'cles_run.csv' '03_persistance'
+    # profils dont la ruche n'est pas chargee (utilisateur non connecte) : leurs cles ne sont pas lisibles sans modifier
+    # le poste (chargement de ruche) -> on le dit. Le mode VSS copie leurs NTUSER.DAT pour une analyse ulterieure.
+    $unl = @(Get-CimInstance Win32_UserProfile | Where-Object { -not $_.Special -and -not $_.Loaded -and $_.SID -match $script:UserSidRx } | ForEach-Object { Split-Path -Leaf $_.LocalPath })
+    if ($unl.Count -gt 0) { Add-Finding 'INFO' 'Couverture' ("Utilisateurs non connectes : demarrage automatique (Run), UserAssist et RunMRU non lus pour {0}" -f ($unl -join ', ')) '' 'Utiliser le mode VSS (copie des NTUSER.DAT) ou relancer la collecte avec ces utilisateurs connectes' }
 
     $wl = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
     if ($wl) {
@@ -444,11 +449,20 @@ function Mod-Persistance {
         $info = $t | Get-ScheduledTaskInfo
         $act = ($t.Actions | ForEach-Object { ($_.Execute + ' ' + $_.Arguments).Trim() }) -join ' | '
         $tasks.Add([pscustomobject]@{ Tache = ($t.TaskPath + $t.TaskName); Etat = $t.State; Compte = $t.Principal.UserId; EnregistreeLe = [string]$t.Date; Auteur = $t.Author; Action = $act; DerniereExec = [string]$info.LastRunTime; Prochaine = [string]$info.NextRunTime })
-        if ($t.TaskPath -notmatch '^\\Microsoft\\') {
+        # les taches sous \Microsoft\ sont aussi examinees (cachette classique), mais seulement sur des criteres forts
+        $isMs = ($t.TaskPath -match '^\\Microsoft\\')
+        if ($true) {
             foreach ($a in $t.Actions) {
                 if (-not $a.Execute) { continue }
                 $exe = [Environment]::ExpandEnvironmentVariables($a.Execute).Trim('"')
                 $full = ($exe + ' ' + $a.Arguments)
+                if ($isMs) {
+                    $whyMs = @()
+                    if (Test-RiskPath $exe) { $whyMs += 'binaire dans un dossier a risque' }
+                    if ($full -match '(?i)(-enc\b|encodedcommand|frombase64|downloadstring|\biex\b|mshta|https?://)') { $whyMs += 'arguments suspects' }
+                    if ($whyMs.Count -gt 0) { Add-Finding 'ELEVE' 'Tache planifiee' ("{0}{1} [{2}] (dossier Microsoft)" -f $t.TaskPath, $t.TaskName, $t.State) $exe ((($a.Arguments) + ' | ' + ($whyMs -join '; ')).Trim(' |')) }
+                    continue
+                }
                 $sig = Get-SignInfo $exe
                 $sev = 'INFO'; $why = @()
                 if (Test-RiskPath $exe) { $sev = 'ELEVE'; $why += 'binaire dans un dossier a risque' }
@@ -486,7 +500,10 @@ function Mod-Persistance {
     foreach ($cls in '__EventFilter', 'CommandLineEventConsumer', 'ActiveScriptEventConsumer', '__FilterToConsumerBinding') {
         Get-CimInstance -Namespace root\subscription -ClassName $cls | ForEach-Object {
             $wmi.Add([pscustomobject]@{ Classe = $cls; Detail = (($_ | Out-String).Trim() -replace '\s+', ' ') })
-            if ($cls -match 'Consumer') { Add-Finding 'ELEVE' 'Persistance WMI' ("{0} : {1}" -f $cls, $_.Name) '' (($_.CommandLineTemplate + $_.ScriptText)) }
+            # seuls les consommateurs qui executent quelque chose sont critiques ; la liaison "SCM Event Log"
+            # est installee d'origine par Windows (elle ne doit pas declencher d'alerte sur un poste sain)
+            if ($cls -in 'CommandLineEventConsumer', 'ActiveScriptEventConsumer') { Add-Finding 'ELEVE' 'Persistance WMI' ("{0} : {1}" -f $cls, $_.Name) '' (($_.CommandLineTemplate + $_.ScriptText)) }
+            elseif ($cls -eq '__FilterToConsumerBinding' -and ($_ | Out-String) -notmatch 'SCM Event Log') { Add-Finding 'MOYEN' 'Persistance WMI' ('Liaison filtre/consommateur WMI non standard') '' ((($_ | Out-String).Trim() -replace '\s+', ' ')) }
         }
     }
     $null = Save-Csv $wmi 'wmi_abonnements.csv' '03_persistance'

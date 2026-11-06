@@ -19,7 +19,10 @@ Set-ItemProperty -Path $k -Name ProcessCreationIncludeCmdLine_Enabled -Value 1 -
 $k2 = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging'
 New-Item -Path $k2 -Force | Out-Null
 Set-ItemProperty -Path $k2 -Name EnableScriptBlockLogging -Value 1 -Type DWord
-wevtutil sl Security /ms:268435456
-wevtutil sl "Microsoft-Windows-PowerShell/Operational" /ms:268435456
+# taille portee a 256 Mo seulement si elle est inferieure (ne jamais reduire un journal deja plus grand)
+foreach ($ln in 'Security', 'Microsoft-Windows-PowerShell/Operational') {
+    $cur = 0; try { $cur = (Get-WinEvent -ListLog $ln -ErrorAction Stop).MaximumSizeInBytes } catch { }
+    if ($cur -lt 268435456) { wevtutil sl "$ln" /ms:268435456 }
+}
 Write-Host 'Journalisation renforcee. Fait le' (Get-Date -Format 'yyyy-MM-dd HH:mm') -ForegroundColor Green
 Read-Host 'Entree pour fermer' | Out-Null

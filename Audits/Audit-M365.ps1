@@ -2,6 +2,8 @@
  BLL Audit Microsoft 365 - audit en LECTURE SEULE d'un tenant (a lancer depuis votre poste, pas depuis la pharmacie).
  Prerequis : compte administrateur general ou lecteur de securite du tenant. Le module Microsoft.Graph.Authentication
  (et ExchangeOnlineManagement pour la partie messagerie) est installe pour l'utilisateur courant si absent.
+ Note : a la premiere connexion, Microsoft demande de consentir a l'application "Microsoft Graph Command Line Tools"
+ (enregistrement de cette application dans le tenant). L'audit lui-meme ne modifie rien.
  Usage : Lancer-M365.bat   ou   powershell -ExecutionPolicy Bypass -File Audits\Audit-M365.ps1 [-SansExchange] [-Pays FR,BE]
 #>
 [CmdletBinding()]
@@ -52,19 +54,32 @@ Invoke-Module 'Microsoft 365 : identites et acces' {
     $caMfa = @($ca | Where-Object { @($_['grantControls']['builtInControls']) -contains 'mfa' -or $_['grantControls']['authenticationStrength'] })
     $sdOn = ($sd -and $sd['isEnabled'])
     Add-Check $c 'MFA impose par Security Defaults ou une strategie d''acces conditionnel' ($sdOn -or $caMfa.Count -gt 0) ('Security Defaults=' + $sdOn + ' ; strategies CA actives=' + $ca.Count + ' dont MFA=' + $caMfa.Count) 'Activer Security Defaults (petit tenant) ou une strategie d''acces conditionnel exigeant le MFA pour tous.' 'ELEVE'
-    $legacy = @($ca | Where-Object { @($_['conditions']['clientAppTypes']) -contains 'exchangeActiveSync' -and @($_['grantControls']['builtInControls']) -contains 'block' })
+    # strategie de blocage du legacy : clients "other" (IMAP/POP/SMTP...) ou ActiveSync, appliquee a TOUS les utilisateurs
+    $legacy = @($ca | Where-Object { $ty = @($_['conditions']['clientAppTypes']); ($ty -contains 'other' -or $ty -contains 'exchangeActiveSync') -and @($_['grantControls']['builtInControls']) -contains 'block' -and @($_['conditions']['users']['includeUsers']) -contains 'All' })
     if ($ca.Count -gt 0) { Add-Check $c 'Authentification heritee bloquee (acces conditionnel)' ($legacy.Count -gt 0) ('strategies bloquant le legacy : ' + $legacy.Count) 'Bloquer les protocoles d''authentification herites.' 'MOYEN' }
 
-    # MFA par utilisateur
+    # Utilisateurs (sans signInActivity, qui exige une licence Entra ID P1 : lu a part plus bas)
+    $usersBasic = @(); $uById = @{}
+    try {
+        $usersBasic = @(GraphGet 'https://graph.microsoft.com/v1.0/users?$select=id,displayName,userPrincipalName,accountEnabled,userType,createdDateTime&$top=999')
+        foreach ($u in $usersBasic) { $uById[[string]$u['id']] = $u }
+    } catch { }
+
+    # MFA par utilisateur : comptes actifs internes seulement (boites partagees et comptes desactives exclus)
     try {
         $reg = GraphGet 'https://graph.microsoft.com/v1.0/reports/authenticationMethods/userRegistrationDetails?$top=999'
-        $rows = @($reg | ForEach-Object { [pscustomobject]@{ Utilisateur = $_['userPrincipalName']; Admin = $_['isAdmin']; MfaEnregistre = $_['isMfaRegistered']; MfaCapable = $_['isMfaCapable']; Methodes = (@($_['methodsRegistered']) -join ',') } })
+        $rows = @($reg | ForEach-Object {
+            $u = $uById[[string]$_['id']]
+            $actif = $true; if ($u) { $actif = [bool]$u['accountEnabled'] }
+            [pscustomobject]@{ Utilisateur = $_['userPrincipalName']; Actif = $actif; Type = [string]$_['userType']; Admin = $_['isAdmin']; MfaEnregistre = $_['isMfaRegistered']; MfaCapable = $_['isMfaCapable']; Methodes = (@($_['methodsRegistered']) -join ',') }
+        })
         $null = Save-Csv $rows 'm365_mfa_par_utilisateur.csv' ''
+        $rows = @($rows | Where-Object { $_.Actif -and $_.Type -ne 'guest' })
         $noMfa = @($rows | Where-Object { -not $_.MfaEnregistre })
         $adm = @($rows | Where-Object { $_.Admin -and -not $_.MfaEnregistre })
         Add-Check $c 'Tous les administrateurs ont enregistre le MFA' ($adm.Count -eq 0) (($adm | ForEach-Object { $_.Utilisateur }) -join ' ; ') 'Enregistrer le MFA pour chaque compte administrateur immediatement.' 'ELEVE'
         Add-Check $c 'Tous les utilisateurs ont enregistre le MFA' ($noMfa.Count -eq 0) ([string]$noMfa.Count + ' sur ' + $rows.Count + ' : ' + (($noMfa | Select-Object -First 10 | ForEach-Object { $_.Utilisateur }) -join ' ; ')) 'Faire enregistrer le MFA a chaque utilisateur.' 'ELEVE'
-        $sms = @($rows | Where-Object { $_.Methodes -match 'mobilePhone|voice' -and $_.Methodes -notmatch 'microsoftAuthenticator|fido|windowsHello|softwareOath' })
+        $sms = @($rows | Where-Object { $_.Methodes -match 'mobilePhone|voice' -and $_.Methodes -notmatch '(?i)microsoftAuthenticator|fido2|windowsHello|softwareOneTimePasscode|hardwareOneTimePasscode|passKey' })
         Add-Check $c 'MFA autre que SMS/voix seul' ($sms.Count -eq 0) ([string]$sms.Count + ' utilisateur(s) en SMS/voix uniquement') 'Passer a Microsoft Authenticator.' 'FAIBLE'
     } catch { Add-Check $c 'MFA par utilisateur' $null ('non verifiable : ' + $_.Exception.Message) }
 
@@ -79,16 +94,25 @@ Invoke-Module 'Microsoft 365 : identites et acces' {
         }
     } catch { }
 
-    # Comptes inactifs et invites
-    try {
-        $users = GraphGet 'https://graph.microsoft.com/v1.0/users?$select=displayName,userPrincipalName,accountEnabled,userType,createdDateTime,signInActivity&$top=999'
-        $guests = @($users | Where-Object { $_['userType'] -eq 'Guest' })
-        $null = Save-Csv ($users | ForEach-Object { [pscustomobject]@{ Nom = $_['displayName']; Upn = $_['userPrincipalName']; Actif = $_['accountEnabled']; Type = $_['userType']; Cree = $_['createdDateTime']; DerniereConnexion = $_['signInActivity']['lastSuccessfulSignInDateTime'] } }) 'm365_utilisateurs.csv' ''
+    # Comptes invites (sans licence particuliere)
+    if ($usersBasic.Count -gt 0) {
+        $guests = @($usersBasic | Where-Object { $_['userType'] -eq 'Guest' })
         Add-Check $c 'Aucun compte invite (externe) non justifie' ($guests.Count -eq 0) ([string]$guests.Count + ' invite(s) : ' + (($guests | Select-Object -First 8 | ForEach-Object { $_['userPrincipalName'] }) -join ' ; ')) 'Verifier chaque compte invite.' 'FAIBLE'
+    } else { Add-Check $c 'Comptes invites' $null 'non verifiable (liste des utilisateurs illisible)' }
+    # Derniere connexion (licence Entra ID P1) : comptes actifs sans connexion depuis 90 jours, ou jamais connectes et crees il y a plus de 90 jours
+    $lastSi = @{}
+    try {
+        foreach ($u in (GraphGet 'https://graph.microsoft.com/v1.0/users?$select=id,signInActivity&$top=999')) {
+            if ($u['signInActivity']) { $lastSi[[string]$u['id']] = $u['signInActivity']['lastSuccessfulSignInDateTime'] }
+        }
         $lim = (Get-Date).AddDays(-90)
-        $inact = @($users | Where-Object { $_['accountEnabled'] -and $_['userType'] -ne 'Guest' -and $_['signInActivity'] -and $_['signInActivity']['lastSuccessfulSignInDateTime'] -and ([datetime]$_['signInActivity']['lastSuccessfulSignInDateTime']) -lt $lim })
-        Add-Check $c 'Aucun compte actif sans connexion depuis 90 jours' ($inact.Count -eq 0) (($inact | Select-Object -First 8 | ForEach-Object { $_['userPrincipalName'] }) -join ' ; ') 'Desactiver les comptes inutilises.' 'MOYEN'
-    } catch { Add-Check $c 'Comptes inactifs et invites' $null 'non verifiable (licence Entra ID P1 requise pour signInActivity ?)' }
+        $inact = @($usersBasic | Where-Object {
+            $l = $lastSi[[string]$_['id']]
+            $_['accountEnabled'] -and $_['userType'] -ne 'Guest' -and (($l -and ([datetime]$l) -lt $lim) -or (-not $l -and $_['createdDateTime'] -and ([datetime]$_['createdDateTime']) -lt $lim))
+        })
+        Add-Check $c 'Aucun compte actif sans connexion depuis 90 jours' ($inact.Count -eq 0) (($inact | Select-Object -First 8 | ForEach-Object { $_['userPrincipalName'] }) -join ' ; ') 'Desactiver les comptes inutilises (les boites partagees doivent etre des comptes desactives).' 'MOYEN'
+    } catch { Add-Check $c 'Comptes inactifs' $null 'non verifiable (licence Entra ID P1 requise pour la date de derniere connexion)' }
+    $null = Save-Csv ($usersBasic | ForEach-Object { [pscustomobject]@{ Nom = $_['displayName']; Upn = $_['userPrincipalName']; Actif = $_['accountEnabled']; Type = $_['userType']; Cree = $_['createdDateTime']; DerniereConnexion = $lastSi[[string]$_['id']] } }) 'm365_utilisateurs.csv' ''
 
     # Consentements d'applications
     try {
@@ -131,8 +155,10 @@ if (-not $SansExchange) {
         $susp = New-Object System.Collections.Generic.List[object]
         foreach ($m in $mbx) {
             foreach ($r in @(Get-InboxRule -Mailbox $m.UserPrincipalName -ErrorAction SilentlyContinue)) {
-                if ($r.ForwardTo -or $r.ForwardAsAttachmentTo -or $r.RedirectTo -or $r.DeleteMessage -or ($r.MoveToFolder -match 'RSS|Archive|Conversation History')) {
-                    $susp.Add([pscustomobject]@{ Boite = $m.UserPrincipalName; Regle = $r.Name; Activee = $r.Enabled; Redirige = (@($r.ForwardTo) + @($r.RedirectTo) + @($r.ForwardAsAttachmentTo) -join ';'); Supprime = $r.DeleteMessage; Dossier = $r.MoveToFolder })
+                if ($r.ForwardTo -or $r.ForwardAsAttachmentTo -or $r.RedirectTo -or $r.DeleteMessage -or ($r.MoveToFolder -match '(?i)RSS|Archive|Conversation History|Historique des conversations')) {
+                    # proprietes vides exclues avant la jointure (sinon ";;" serait compte comme une redirection)
+                    $redir = (@($r.ForwardTo, $r.RedirectTo, $r.ForwardAsAttachmentTo) | ForEach-Object { $_ } | Where-Object { $_ }) -join ';'
+                    $susp.Add([pscustomobject]@{ Boite = $m.UserPrincipalName; Regle = $r.Name; Activee = $r.Enabled; Redirige = $redir; Supprime = [bool]$r.DeleteMessage; Dossier = $r.MoveToFolder })
                 }
             }
         }
@@ -148,7 +174,6 @@ if (-not $SansExchange) {
         $cas = @(Get-CASMailbox -ResultSize Unlimited | Where-Object { $_.PopEnabled -or $_.ImapEnabled })
         $null = Save-Csv ($cas | ForEach-Object { [pscustomobject]@{ Boite = $_.PrimarySmtpAddress; Pop = $_.PopEnabled; Imap = $_.ImapEnabled } }) 'm365_pop_imap_actifs.csv' ''
         Add-Check $c 'POP/IMAP desactives sur les boites' ($cas.Count -eq 0) ([string]$cas.Count + ' boite(s) avec POP/IMAP actif') 'Desactiver POP/IMAP par boite si non utilise.' 'MOYEN'
-        $shared = @($mbx | Where-Object { $_.RecipientTypeDetails -eq 'SharedMailbox' })
         Disconnect-ExchangeOnline -Confirm:$false | Out-Null
     }
 }

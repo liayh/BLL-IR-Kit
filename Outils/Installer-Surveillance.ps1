@@ -31,17 +31,32 @@ if ((Read-Host 'Configurer aussi l''envoi par mail ? (O/N)') -match '^[oOyY]') {
     }
     $mail = [ordered]@{ Smtp = $smtp; Port = [int]$port; Ssl = $true; From = $from; To = @($to -split '\s*,\s*'); User = $user; PassProtegee = $prot }
 }
-New-Item -ItemType Directory -Path $dest -Force | Out-Null
 # Le script tourne en SYSTEM : personne d'autre que SYSTEM et les administrateurs ne doit pouvoir lire ou modifier ce dossier
 # (sinon un simple utilisateur pourrait remplacer le script et prendre le controle du poste, ou lire le mot de passe SMTP).
-# SID plutot que noms de groupes : fonctionne sur un Windows en francais.
+# Un utilisateur peut creer C:\ProgramData\BLL AVANT l'installation et s'y donner des droits : ils sont donc tous effaces,
+# les liens/jonctions sont refuses, et le resultat est verifie. SID plutot que noms : fonctionne sur un Windows en francais.
+function Stop-Install { param([string]$m) Write-Host ('ERREUR : ' + $m + ' Installation annulee.') -ForegroundColor Red; Read-Host 'Entree pour fermer' | Out-Null; exit 1 }
 $bll = Split-Path -Parent $dest
-# Droits poses sur la RACINE seulement, puis contenu remis a l'heritage (/reset) : jamais /grant avec /T,
-# qui laisse aux fichiers existants (reinstallation) une liste de droits vide = script illisible par SYSTEM.
+if (-not (Test-Path -LiteralPath $bll)) { New-Item -ItemType Directory -Path $bll -ErrorAction Stop | Out-Null }
+$rp = @(@(Get-Item -LiteralPath $bll -Force) + @(Get-ChildItem -LiteralPath $bll -Recurse -Force -ErrorAction SilentlyContinue) | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint })
+if ($rp.Count -gt 0) { Stop-Install ('lien ou jonction suspect dans ' + $bll + ' : ' + ($rp[0].FullName) + '. Supprimez ce dossier puis relancez.') }
 $null = & icacls.exe $bll /setowner '*S-1-5-32-544' /T /C /Q 2>&1
+$null = & icacls.exe $bll /reset /T /C /Q 2>&1
 $null = & icacls.exe $bll /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /C /Q 2>&1
-if ($LASTEXITCODE -ne 0) { Write-Host ('ERREUR : impossible de proteger ' + $bll + '. Installation annulee.') -ForegroundColor Red; Read-Host 'Entree pour fermer' | Out-Null; exit 1 }
-$null = & icacls.exe (Join-Path $bll '*') /reset /T /C /Q 2>&1
+if ($LASTEXITCODE -ne 0) { Stop-Install ('impossible de proteger ' + $bll + '.') }
+if (@(Get-ChildItem -LiteralPath $bll -Force).Count -gt 0) { $null = & icacls.exe (Join-Path $bll '*') /reset /T /C /Q 2>&1 }
+New-Item -ItemType Directory -Path $dest -Force | Out-Null
+function Test-AdminOnly {
+    param([string]$Path)
+    try {
+        foreach ($r in (Get-Acl -LiteralPath $Path -ErrorAction Stop).GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+            if ($r.AccessControlType -eq 'Allow' -and $r.IdentityReference.Value -notin 'S-1-5-18', 'S-1-5-32-544') { return $false }
+        }
+        return $true
+    } catch { return $false }
+}
+$bad = @(@(Get-Item -LiteralPath $bll -Force) + @(Get-ChildItem -LiteralPath $bll -Recurse -Force) | Where-Object { -not (Test-AdminOnly $_.FullName) })
+if ($bad.Count -gt 0) { Stop-Install ($bll + ' reste accessible a d''autres comptes (' + $bad[0].FullName + ').') }
 Copy-Item -LiteralPath (Join-Path $kit 'Surveillance\Surveiller.ps1') -Destination $dest -Force
 if (Test-Path (Join-Path $kit 'config\autorises.txt')) { Copy-Item -LiteralPath (Join-Path $kit 'config\autorises.txt') -Destination (Join-Path $dest 'autorises.txt') -Force } else { Set-Content (Join-Path $dest 'autorises.txt') '# motifs autorises' }
 $cfg = [ordered]@{ Site = $site; Webhook = @($hook | Where-Object { $_ }); Email = $mail; HeartbeatJours = 7 }

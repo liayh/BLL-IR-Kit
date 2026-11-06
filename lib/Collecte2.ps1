@@ -67,7 +67,7 @@ function Mod-Execution {
 
     # UserAssist
     $ua = New-Object System.Collections.Generic.List[object]
-    foreach ($sid in [Microsoft.Win32.Registry]::Users.GetSubKeyNames() | Where-Object { $_ -match '^S-1-5-21-' -and $_ -notmatch '_Classes$' }) {
+    foreach ($sid in [Microsoft.Win32.Registry]::Users.GetSubKeyNames() | Where-Object { $_ -match $script:UserSidRx }) {
         Get-ChildItem "Registry::HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\UserAssist" | ForEach-Object {
             $cnt = Get-Item -LiteralPath ($_.PSPath + '\Count')
             if ($cnt) {
@@ -88,7 +88,7 @@ function Mod-Execution {
 
     # Commandes tapees dans Executer (RunMRU) et fichiers recents
     $mru = New-Object System.Collections.Generic.List[object]
-    foreach ($sid in [Microsoft.Win32.Registry]::Users.GetSubKeyNames() | Where-Object { $_ -match '^S-1-5-21-' -and $_ -notmatch '_Classes$' }) {
+    foreach ($sid in [Microsoft.Win32.Registry]::Users.GetSubKeyNames() | Where-Object { $_ -match $script:UserSidRx }) {
         $k = Get-Item -LiteralPath "Registry::HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU"
         if ($k) { foreach ($n in $k.GetValueNames()) { if ($n -ne 'MRUList') { $mru.Add([pscustomobject]@{ SID = $sid; Commande = [string]$k.GetValue($n) }) } } }
     }
@@ -130,6 +130,7 @@ function Mod-Journaux {
     $cov = New-Object System.Collections.Generic.List[object]
     $all = New-Object System.Collections.Generic.List[object]
     $conn = New-Object System.Collections.Generic.List[object]
+    $frequentIds = 4624, 4625, 4648, 4672, 4776, 4778, 4779
     $noisy = 5038, 5156, 5158, 5157, 5152, 5153, 4663, 4656, 4658, 4690, 4703, 4670
     $keyIds = @{
         'Security' = 1102, 4624, 4625, 4648, 4672, 4697, 4698, 4699, 4700, 4701, 4702, 4720, 4722, 4723, 4724, 4725, 4726, 4728, 4732, 4740, 4756, 4776, 4778, 4779
@@ -162,7 +163,8 @@ function Mod-Journaux {
         'Microsoft-Windows-PowerShell/Operational|4104' = @('INFO', 'Script PowerShell')
     }
     $counters = @{}
-    $privRx = '^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|127\.|169\.254\.|::1|fe80|-$|\s*$)'
+    # adresses privees : RFC1918, lien local, CGNAT/Tailscale (100.64/10), IPv6 locales (fc00::/7, fe80::), IPv4 mappee ::ffff:
+    $privRx = '^(::ffff:)?(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|127\.|169\.254\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.|::1|f[cd][0-9a-f]{2}:|fe80|-$|\s*$)'
     Get-WinEvent -ListLog * -ErrorAction SilentlyContinue | Where-Object { $_.RecordCount -gt 0 } | ForEach-Object {
         $ln = $_.LogName
         $old = Get-WinEvent -LogName $ln -Oldest -MaxEvents 1 -ErrorAction SilentlyContinue
@@ -175,15 +177,25 @@ function Mod-Journaux {
         # Windows refuse un filtre de plus de 23 numeros d'evenement ("requete invalide") :
         # les numeros sont donc demandes par lots de 20 (le journal Securite en compte 24).
         $idSets = New-Object System.Collections.Generic.List[object]
+        # Les evenements frequents (ouvertures de session...) sont demandes a part : sinon ils rempliraient la limite
+        # de 60000 et feraient disparaitre les evenements rares et importants (journal efface, compte cree...).
         if ($broad) {
             $ids = @($keyIds[$ln])
-            for ($i = 0; $i -lt $ids.Count; $i += 20) { $idSets.Add(@($ids[$i..([Math]::Min($i + 19, $ids.Count - 1))])) }
+            $freq = @($ids | Where-Object { $_ -in $frequentIds })
+            $rare = @($ids | Where-Object { $_ -notin $frequentIds })
+            foreach ($grp in @(, $rare) + @(, $freq)) {
+                for ($i = 0; $i -lt $grp.Count; $i += 20) { $idSets.Add(@($grp[$i..([Math]::Min($i + 19, $grp.Count - 1))])) }
+            }
         } else { $idSets.Add($null) }
         $events = New-Object System.Collections.Generic.List[object]
         foreach ($set in $idSets) {
             $filter = @{ LogName = $ln; StartTime = $locS; EndTime = $locE }
             if ($set) { $filter.Id = $set }
-            try { foreach ($ev in (Get-WinEvent -FilterHashtable $filter -MaxEvents 60000 -ErrorAction Stop)) { $events.Add($ev) } }
+            try {
+                $got = @(Get-WinEvent -FilterHashtable $filter -MaxEvents 60000 -ErrorAction Stop)
+                foreach ($ev in $got) { $events.Add($ev) }
+                if ($got.Count -ge 60000) { Add-Finding 'MOYEN' 'Couverture des journaux' ("Journal {0} : limite de 60000 evenements atteinte, les plus anciens de la fenetre ne sont pas analyses" -f $ln) '' ('ID : ' + (@($set) -join ',')) }
+            }
             catch {
                 # "aucun evenement" est normal ; toute autre erreur sur un journal cle est signalee
                 if ($_.FullyQualifiedErrorId -notmatch 'NoMatchingEventsFound' -and $keyIds.ContainsKey($ln)) { $script:Errors.Add('Journal ' + $ln + ' : ' + $_.Exception.Message) }
@@ -191,8 +203,8 @@ function Mod-Journaux {
         }
         foreach ($e in $events) {
             if ($e.Id -in $noisy -and $ln -eq 'Security') { continue }
-            $msg = ([string]$e.Message) -replace '\s+', ' '
-            if ($msg.Length -gt 350) { $msg = $msg.Substring(0, 350) }
+            $fullMsg = ([string]$e.Message) -replace '\s+', ' '
+            $msg = $fullMsg; if ($msg.Length -gt 350) { $msg = $msg.Substring(0, 350) }
             $t = U $e.TimeCreated
             $all.Add([pscustomobject]@{ TempsUtc = $t; Journal = $ln; Id = $e.Id; Source = $e.ProviderName; Message = $msg })
             if ($ln -eq 'Security' -and ($e.Id -eq 4624 -or $e.Id -eq 4625 -or $e.Id -eq 4648)) {
@@ -215,7 +227,7 @@ function Mod-Journaux {
             $rk = $ln + '|' + $id
             if (($id -eq '104' -or $id -eq '1102') -and $e.ProviderName -ne 'Microsoft-Windows-Eventlog') { continue }
             if ($rules.ContainsKey($rk)) {
-                if ($id -eq '4104') { if ($msg -notmatch '(?i)-enc\b|frombase64string|downloadstring|downloadfile|invoke-expression|\biex\b|net\.webclient|-executionpolicy\s+bypass|-w(indowstyle)?\s+hidden|invoke-webrequest|start-bitstransfer' -or $msg -match '__cmdletization|BLL IR-Kit|Mod-Journaux|Invoke-Module') { continue } }
+                if ($id -eq '4104') { if ($fullMsg -notmatch '(?i)-enc\b|frombase64string|downloadstring|downloadfile|invoke-expression|\biex\b|net\.webclient|-executionpolicy\s+bypass|-w(indowstyle)?\s+hidden|invoke-webrequest|start-bitstransfer' -or $fullMsg -match '__cmdletization|BLL IR-Kit|Mod-Journaux|Invoke-Module|Add-Finding|Say \(') { continue } }
                 $sev = $rules[$rk][0]
                 if ($id -eq '5007' -and $msg -notmatch '(?i)Exclusions|DisableAntiSpyware|DisableRealtimeMonitoring|DisableBehaviorMonitoring|DisableIOAVProtection|TamperProtection|DisableScriptScanning = 0x1|SubmitSamplesConsent') { continue }
                 if ($id -eq '59') {
@@ -352,16 +364,21 @@ function Mod-Fichiers {
                 $py.Add([pscustomobject]@{ Chemin = $path; CreeUtc = (U $c); ModifieUtc = (U $w); Taille = $f.Length })
             }
             if ($name -match $bizRx) { $biz.Add([pscustomobject]@{ Chemin = $path; CreeUtc = (U $c); ModifieUtc = (U $w); AccedeUtc = (U $a); Taille = $f.Length }) }
-            if ($noteExt -contains $ext -and $f.Length -lt 300KB -and $path -notmatch '(?i)\\Windows\\|\\Program Files|\\AppData\\Local\\(Microsoft|Google|Packages)' -and $name -match $noteName) {
-                $hit = ''
+            if ($noteExt -contains $ext -and $f.Length -lt 300KB -and $path -notmatch '(?i)\\Windows\\|\\Program Files|\\AppData\\Local\\(Microsoft|Google|Packages)|\\node_modules\\|\\site-packages\\|\\\.vscode|\\\.git\\|\\\.cargo\\|\\\.nuget\\' -and $name -match $noteName) {
+                # une documentation (README de bibliotheque...) peut contenir "decrypt" : il faut 2 mots-cles differents,
+                # ou 1 seul si le fichier a ete cree/modifie dans la fenetre analysee
+                $found = @()
                 try {
                     $head = (Read-TextSmart $path -MaxBytes 200KB) -join ' '
-                    foreach ($k in $kw) { if ($head.IndexOf($k, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $hit = $k; break } }
+                    foreach ($k in $kw) { if ($head.IndexOf($k, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $found += $k } }
                 } catch { }
+                $hit = ''
+                if ($found.Count -ge 2 -or ($found.Count -ge 1 -and ($inC -or $inW))) { $hit = ($found -join ', ') }
                 if ($hit) { $notes.Add([pscustomobject]@{ Chemin = $path; CreeUtc = (U $c); ModifieUtc = (U $w); Taille = $f.Length; MotCle = $hit }) }
             }
         }
     }
+    if ($cw.Count -ge $max) { Add-Finding 'MOYEN' 'Couverture' ("Plus de {0} fichiers crees/modifies dans la fenetre : liste tronquee (les dossiers parcourus en dernier, dont C:\Users, peuvent manquer). Reduire la fenetre horaire." -f $max) }
     $null = Save-Csv ($cw | Sort-Object CreeUtc) 'fichiers_crees_ou_modifies_fenetre.csv' '05_fichiers'
     if (-not $broad) { $null = Save-Csv ($ac | Sort-Object AccedeUtc) 'fichiers_consultes_fenetre.csv' '05_fichiers' }
     $null = Save-Csv ($sp | Sort-Object Chemin) 'noms_de_fichiers_outils_acces_distant.csv' '05_fichiers'

@@ -1,6 +1,6 @@
 ﻿# Core.ps1 - etat global, journalisation, resultats, copie de preuves (empreintes + dates d'origine)
 
-$script:KitVersion = '1.2.3'
+$script:KitVersion = '1.3.0'
 $script:Findings   = New-Object System.Collections.Generic.List[object]
 $script:Errors     = New-Object System.Collections.Generic.List[string]
 $script:Manifest   = New-Object System.Collections.Generic.List[object]
@@ -128,6 +128,9 @@ function Test-RiskPath {
     return ($Path -match $script:RiskDirRx)
 }
 
+# comptes locaux/domaine (S-1-5-21) et comptes Entra ID / Azure AD (S-1-12-1)
+$script:UserSidRx = '^S-1-(5-21|12-1)-[0-9-]+$'
+
 function Get-UserProfiles {
     Get-ChildItem 'C:\Users' -Directory -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -notin 'Default', 'Default User', 'All Users', 'Public' }
 }
@@ -179,7 +182,9 @@ function Copy-Evidence {
         }
     } else {
         $base = $null
-        $items = @(Get-ChildItem -Path $Source -File -Force -ErrorAction SilentlyContinue)
+        # fichier unique : chemin litteral (un nom contenant [ ] serait sinon pris pour un motif et ignore)
+        if (Test-Path -LiteralPath $Source -PathType Leaf) { $items = @(Get-Item -LiteralPath $Source -Force) }
+        else { $items = @(Get-ChildItem -Path $Source -File -Force -ErrorAction SilentlyContinue) }
     }
     $nb = 0
     foreach ($f in ($items | Sort-Object FullName -Unique)) {
@@ -213,24 +218,48 @@ function Copy-Evidence {
 # ---------------------------------------------------------------------------
 # Protection des donnees sensibles : seuls SYSTEM et les administrateurs y accedent
 # ---------------------------------------------------------------------------
+function Test-AdminOnlyAcl {
+    # vrai si AUCUN droit "autoriser" n'est accorde a un autre compte que SYSTEM ou Administrateurs
+    param([string]$Path)
+    try {
+        $rules = (Get-Acl -LiteralPath $Path -ErrorAction Stop).GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])
+        foreach ($r in $rules) {
+            if ($r.AccessControlType -eq 'Allow' -and $r.IdentityReference.Value -notin 'S-1-5-18', 'S-1-5-32-544') { return $false }
+        }
+        return $true
+    } catch { return $false }
+}
+
 function Set-AdminOnlyAcl {
-    # 1) la RACINE seule recoit SYSTEM + Administrateurs (heritables), sans heritage du parent.
-    #    Jamais /grant avec /T : applique aux fichiers, il leur laisse une liste de droits vide
-    #    (fichiers illisibles meme pour un administrateur - bug corrige en 1.2.2/1.2.3).
-    # 2) le CONTENU est remis a l'heritage pur (/reset) : chaque fichier recoit exactement les droits de la racine.
+    # Reserve un dossier (et tout son contenu) a SYSTEM et aux Administrateurs, puis le VERIFIE.
+    #  0) refus des liens/jonctions (redirection vers un dossier controle par un tiers)
+    #  1) proprietaire = Administrateurs ; /reset efface tout droit explicite pose par un tiers
+    #  2) la RACINE seule recoit SYSTEM + Administrateurs (heritables), sans heritage du parent.
+    #     Jamais /grant avec /T : applique aux fichiers, il leur laisse une liste de droits vide
+    #     (fichiers illisibles meme pour un administrateur - bug de la 1.2.1).
+    #  3) le CONTENU est remis a l'heritage pur (/reset /T) : exactement les droits de la racine.
+    #  4) controle : aucun autre compte n'a de droit, et chaque fichier reste lisible par un administrateur.
     # SID plutot que noms : fonctionne sur un Windows en francais.
     param([string]$Full)
+    $it = Get-Item -LiteralPath $Full -Force
+    $rp = @(Get-ChildItem -LiteralPath $Full -Recurse -Force -Attributes ReparsePoint -ErrorAction SilentlyContinue)
+    if (($it.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $rp.Count -gt 0) {
+        Say ('ATTENTION : lien ou jonction dans ' + $Full + ' : protection refusee.') 'Red'; return $false
+    }
+    $null = & icacls.exe $Full /setowner '*S-1-5-32-544' /T /C /Q 2>&1
+    $null = & icacls.exe $Full /reset /C /Q 2>&1
     $null = & icacls.exe $Full /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /C /Q 2>&1
     if ($LASTEXITCODE -ne 0) { Say ('ATTENTION : droits non appliques sur ' + $Full) 'Yellow'; return $false }
     if (@(Get-ChildItem -LiteralPath $Full -Force -ErrorAction SilentlyContinue).Count -gt 0) {
         $null = & icacls.exe (Join-Path $Full '*') /reset /T /C /Q 2>&1
     }
-    # controle : tout fichier doit rester lisible par un administrateur
-    $ko = 0
-    foreach ($f in (Get-ChildItem -LiteralPath $Full -Recurse -File -Force -ErrorAction SilentlyContinue)) {
-        try { $fs = [IO.File]::Open($f.FullName, 'Open', 'Read', 'ReadWrite'); $fs.Dispose() } catch { $ko++ }
+    $foreign = 0; $unread = 0
+    foreach ($i in (@($it) + @(Get-ChildItem -LiteralPath $Full -Recurse -Force -ErrorAction SilentlyContinue))) {
+        if (-not (Test-AdminOnlyAcl $i.FullName)) { $foreign++ }
+        if (-not $i.PSIsContainer) { try { $fs = [IO.File]::Open($i.FullName, 'Open', 'Read', 'ReadWrite'); $fs.Dispose() } catch { $unread++ } }
     }
-    if ($ko -gt 0) { Say ('ATTENTION : ' + $ko + ' fichier(s) illisible(s) dans ' + $Full) 'Yellow'; return $false }
+    if ($foreign -gt 0) { Say ('ATTENTION : ' + $foreign + ' element(s) de ' + $Full + ' restent accessibles a d''autres comptes.') 'Red'; return $false }
+    if ($unread -gt 0) { Say ('ATTENTION : ' + $unread + ' fichier(s) illisible(s) dans ' + $Full) 'Yellow'; return $false }
     return $true
 }
 
@@ -264,7 +293,7 @@ function Protect-Folder {
     try {
         $full = (Get-Item -LiteralPath $Path -Force).FullName
         $root = [IO.Path]::GetPathRoot($full)
-        if ($root -like '\\*') { Say ('ATTENTION : ' + $full + ' est sur un partage reseau, droits non verifiables.') 'Yellow'; return $false }
+        if ($root -like '\\*' -or ([IO.DriveInfo]$root).DriveType -eq 'Network') { Say ('ATTENTION : ' + $full + ' est sur un partage reseau, droits non verifiables.') 'Yellow'; return $false }
         $fmt = ([IO.DriveInfo]$root).DriveFormat
         if ($fmt -notin 'NTFS', 'ReFS') {
             Say ('ATTENTION : le support ' + $root + ' est en ' + $fmt + ' (pas de droits d''acces) : raw_SENSIBLE est lisible par quiconque a la cle. Gardez-la sous clef.') 'Yellow'
@@ -337,11 +366,18 @@ function Save-Resultats {
             if (Test-Path -LiteralPath $dest) { Say ('Destination deja existante, rien n''est ecrase : ' + $dest) 'Red'; return }
             # 1) arborescence ; raw_SENSIBLE est protege AVANT d'y copier quoi que ce soit :
             #    les fichiers copies heritent des droits, aucun droit n'est modifie apres coup.
-            $null = New-Item -ItemType Directory -Path $dest -Force -ErrorAction Stop
+            # sans -Force : echoue si un tiers a cree le dossier entre-temps (il en controlerait les droits)
+            $null = New-Item -ItemType Directory -Path $dest -ErrorAction Stop
+            $skipSens = $false
             if ($hasSens) {
                 $ds = Join-Path $dest 'raw_SENSIBLE'
-                $null = New-Item -ItemType Directory -Path $ds -Force -ErrorAction Stop
-                $null = Protect-Folder $ds
+                $null = New-Item -ItemType Directory -Path $ds -ErrorAction Stop
+                if (-not (Protect-Folder $ds)) {
+                    Write-Host ' raw_SENSIBLE ne peut pas etre protege a cet endroit (voir ci-dessus).' -ForegroundColor Yellow
+                    if ((Read-Host ' Copier quand meme les donnees sensibles SANS protection ? Taper OUI') -cne 'OUI') {
+                        $skipSens = $true; Say 'Donnees sensibles NON copiees (raw_SENSIBLE reste vide).' 'Yellow'
+                    }
+                }
             }
             foreach ($d in (Get-ChildItem -LiteralPath $src -Recurse -Directory -Force)) {
                 $null = New-Item -ItemType Directory -Path (Join-Path $dest $d.FullName.Substring($src.Length).TrimStart('\')) -Force
@@ -352,6 +388,7 @@ function Save-Resultats {
             $bad = New-Object System.Collections.Generic.List[string]; $n = 0
             foreach ($f in (Get-ChildItem -LiteralPath $src -Recurse -File -Force)) {
                 $rel = $f.FullName.Substring($src.Length).TrimStart('\')
+                if ($skipSens -and $rel -like 'raw_SENSIBLE\*') { continue }
                 $g = Join-Path $dest $rel
                 $isLog = ($f.Name -eq 'collecte.log' -or $f.Name -eq 'audit.log')
                 $why = 'non copie'
@@ -379,7 +416,7 @@ function Save-Resultats {
                 foreach ($b in ($bad | Select-Object -First 10)) { Say ('   - ' + $b) 'Red' }
                 try { Set-Content -LiteralPath (Join-Path $parent ($stampName + '_verification_copie.txt')) -Value $bad -Encoding UTF8 } catch { }
             }
-            if ($hasSens) { Say 'Cette copie contient raw_SENSIBLE : ne la transmettez a personne.' 'Yellow' }
+            if ($hasSens -and -not $skipSens) { Say 'Cette copie contient raw_SENSIBLE : ne la transmettez a personne.' 'Yellow' }
         }
     } catch {
         Say ('ERREUR d''enregistrement : ' + $_.Exception.Message) 'Red'
@@ -392,5 +429,7 @@ function Open-Rapport {
     $p = Join-Path $script:Out $Rapport
     if (-not (Test-Path -LiteralPath $p)) { Say ('ERREUR : rapport introuvable : ' + $p) 'Red'; return }
     Save-Resultats -Rapport $Rapport
-    try { Start-Process -FilePath $p } catch { Say ('Ouvrez le rapport manuellement : ' + $p) 'Yellow' }
+    # ouverture par l'Explorateur deja lance (droits utilisateur) : pas de navigateur avec les droits administrateur
+    try { Start-Process -FilePath 'explorer.exe' -ArgumentList ('"' + $p + '"') -ErrorAction Stop }
+    catch { try { Start-Process -FilePath $p } catch { Say ('Ouvrez le rapport manuellement : ' + $p) 'Yellow' } }
 }

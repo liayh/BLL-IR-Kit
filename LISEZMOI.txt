@@ -1,4 +1,4 @@
-BLL IR-Kit - collecte de preuves portable (aucune installation)
+﻿BLL IR-Kit - collecte de preuves portable (aucune installation)
 ================================================================
 
 PRINCIPE
@@ -28,7 +28,7 @@ RESULTATS
   rapport.html          rapport detaille
   01_systeme ... 08_synthese   tableaux CSV (separateur ;, ouvrir avec Excel)
   raw\                  copies des preuves (traces AnyDesk, Prefetch, evtx, ...), dates d'origine conservees
-  raw_SENSIBLE\         cles AnyDesk (*.conf), historiques navigateur : NE PAS TRANSMETTRE
+  raw_SENSIBLE\         cles AnyDesk (*.conf), historiques navigateur et PowerShell : NE PAS TRANSMETTRE
   manifeste_des_copies.csv, SHA256SUMS.txt, FICHE_DE_COLLECTE.txt   integrite et chaine de possession
   ..._SANS_SENSIBLE.zip archive transmissible (sans raw_SENSIBLE)
 
@@ -45,7 +45,12 @@ SECURITE : L'OUTIL N'OUVRE AUCUN ACCES DEPUIS L'EXTERIEUR
     l'indique ; gardez la cle sous clef et effacez raw_SENSIBLE des qu'il n'est plus utile.
   - Dossier de surveillance C:\ProgramData\BLL : modifiable et lisible uniquement par SYSTEM et les administrateurs
     (un utilisateur ne peut ni remplacer le script execute en SYSTEM, ni lire le mot de passe SMTP).
-  - Audit reseau local : UPnP interroge uniquement l'equipement local qui repond, jamais une adresse externe.
+  - Audit reseau local : UPnP interroge uniquement l'equipement local qui repond (redirections refusees),
+    jamais une adresse externe.
+  - L'audit reseau local est ACTIF : balayage ping du /24, test de 20 ports TCP par equipement, demande DHCP
+    de test (5 s). Il peut declencher une alerte sur un pare-feu ou un enregistreur video : prevenir le titulaire.
+  - Une copie protegee impossible (cle FAT32/exFAT, partage reseau) est signalee ; la copie des donnees
+    sensibles demande alors une confirmation (OUI).
 
 CONFIGURATION (dossier config\)
   ioc.txt            indicateurs a retrouver partout (ID AnyDesk, IP, empreintes)  - ajouter les votres
@@ -96,7 +101,9 @@ AUDITS ET SURVEILLANCE (v1.1)
      protection temps reel / anti-falsification Defender ou pare-feu DESACTIVES.
    - Si l'alerte ne peut pas partir (Internet coupe), elle est renvoyee au controle suivant.
    - Signe de vie hebdomadaire : l'absence de message signale une panne de surveillance.
-   - Apres un changement legitime : Surveiller.ps1 -Init, ou ajouter un motif dans autorises.txt.
+   - Apres un changement legitime : Surveiller.ps1 -Init, ou ajouter un motif dans autorises.txt
+     (sans effet sur : protection coupee, administrateurs, exclusions Defender, portproxy, hosts, RDP).
+   - Si la reference de surveillance est illisible, elle est recreee et une alerte le signale.
    - Retrait : Outils\Desinstaller-Surveillance.ps1.
 
 CONFIG SUPPLEMENTAIRE : config\sauvegardes.txt (destinations;age max en heures), config\fichiers_sensibles.txt.
