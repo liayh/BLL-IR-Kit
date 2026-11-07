@@ -1,6 +1,6 @@
 ﻿# Core.ps1 - etat global, journalisation, resultats, copie de preuves (empreintes + dates d'origine)
 
-$script:KitVersion = '1.3.0'
+$script:KitVersion = '1.3.1'
 $script:Findings   = New-Object System.Collections.Generic.List[object]
 $script:Errors     = New-Object System.Collections.Generic.List[string]
 $script:Manifest   = New-Object System.Collections.Generic.List[object]
@@ -421,6 +421,18 @@ function Save-Resultats {
     } catch {
         Say ('ERREUR d''enregistrement : ' + $_.Exception.Message) 'Red'
     } finally { if ($owner) { $owner.Dispose() } }
+}
+
+function Wait-Fin {
+    # fin d'analyse : depuis le menu (BLL-IR-Kit.bat), proposer un autre test ou fermer (code 99 = fermer l'outil)
+    param([switch]$Menu)
+    if (-not $Menu) { Read-Host 'Entree pour fermer' | Out-Null; return }
+    Write-Host ''
+    Write-Host ' Que voulez-vous faire ?' -ForegroundColor Cyan
+    Write-Host '   1 (ou Entree) = faire un autre test (retour au menu)'
+    Write-Host '   0             = fermer BLL IR-Kit'
+    if ("$(Read-Host ' Choix')".Trim() -eq '0') { exit 99 }
+    exit 0
 }
 
 function Open-Rapport {

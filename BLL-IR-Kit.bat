@@ -19,17 +19,22 @@ echo  0) Quitter
 echo.
 set "c="
 set /p "c= Choix : "
-if "%c%"=="1" ( call :admin "IR-Kit.ps1" & goto menu )
-if "%c%"=="2" ( call :admin "Audit-Kit.ps1" & goto menu )
-if "%c%"=="3" ( powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0Audits\Audit-M365.ps1" & goto menu )
-if "%c%"=="4" ( call :admin "Outils\Installer-Surveillance.ps1" & goto menu )
-if "%c%"=="5" ( call :admin "Outils\Desinstaller-Surveillance.ps1" & goto menu )
+if "%c%"=="1" ( call :admin "IR-Kit.ps1" & goto suite )
+if "%c%"=="2" ( call :admin "Audit-Kit.ps1" & goto suite )
+if "%c%"=="3" ( powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0Audits\Audit-M365.ps1" -Menu & goto suite )
+if "%c%"=="4" ( call :admin "Outils\Installer-Surveillance.ps1" & goto suite )
+if "%c%"=="5" ( call :admin "Outils\Desinstaller-Surveillance.ps1" & goto suite )
 if "%c%"=="0" exit /b 0
 goto menu
 
+:suite
+rem fin d'une analyse : code 99 = l'utilisateur a choisi de fermer l'outil, sinon retour au menu
+if errorlevel 99 exit /b 0
+goto menu
+
 :admin
-rem Lance le script dans une fenetre administrateur et attend sa fin.
+rem Lance le script dans une fenetre administrateur, attend sa fin et renvoie son code de sortie.
 rem Le chemin passe par une variable d'environnement : pas de probleme d'espaces ou d'apostrophes.
 set "BLL_SCRIPT=%~dp0%~1"
-powershell -NoProfile -Command "try { Start-Process -FilePath powershell.exe -Verb RunAs -Wait -ArgumentList ('-NoProfile -ExecutionPolicy Bypass -File \"' + $env:BLL_SCRIPT + '\"') -ErrorAction Stop } catch { Write-Host ''; Write-Host ' Droits administrateur refuses : action annulee.' -ForegroundColor Yellow; Start-Sleep -Seconds 3 }"
-exit /b 0
+powershell -NoProfile -Command "try { $p = Start-Process -FilePath powershell.exe -Verb RunAs -PassThru -ArgumentList ('-NoProfile -ExecutionPolicy Bypass -File \"' + $env:BLL_SCRIPT + '\" -Menu') -ErrorAction Stop; $null = $p.Handle; $p.WaitForExit(); exit [int]$p.ExitCode } catch { Write-Host ''; Write-Host ' Droits administrateur refuses : action annulee.' -ForegroundColor Yellow; Start-Sleep -Seconds 3; exit 0 }"
+exit /b %errorlevel%

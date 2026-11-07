@@ -7,7 +7,7 @@
  Usage : Lancer-M365.bat   ou   powershell -ExecutionPolicy Bypass -File Audits\Audit-M365.ps1 [-SansExchange] [-Pays FR,BE]
 #>
 [CmdletBinding()]
-param([switch]$SansExchange, [string[]]$Pays = @('FR'), [string]$Sortie)
+param([switch]$SansExchange, [string[]]$Pays = @('FR'), [string]$Sortie, [switch]$Menu)
 $ErrorActionPreference = 'SilentlyContinue'
 $ProgressPreference = 'SilentlyContinue'
 $script:KitRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
@@ -182,4 +182,4 @@ Disconnect-MgGraph | Out-Null
 Write-Host ''
 Write-Host ('TERMINE : score {0}/100 (note {1}). Rapport : {2}' -f $script:Score, $script:Note, (Join-Path $script:Out 'rapport_audit.html')) -ForegroundColor Green
 Open-Rapport 'rapport_audit.html'
-Read-Host 'Entree pour fermer' | Out-Null
+Wait-Fin -Menu:$Menu

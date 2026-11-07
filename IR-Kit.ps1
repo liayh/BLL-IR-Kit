@@ -10,7 +10,8 @@ param(
     [int]$Jours = 30,           # fenetre par defaut : N derniers jours
     [string]$Sortie,            # dossier de sortie (defaut : <kit>\Resultats)
     [switch]$Vss,               # copie via instantane VSS (fichiers verrouilles)
-    [switch]$SansMenu
+    [switch]$SansMenu,
+    [switch]$Menu               # lance depuis BLL-IR-Kit.bat : proposer un autre test a la fin
 )
 $ErrorActionPreference = 'SilentlyContinue'
 $ProgressPreference = 'SilentlyContinue'
@@ -119,4 +120,4 @@ Say ''
 Say ('TERMINE en {0} min : {1} constats eleves, {2} moyens.' -f [int]((Get-Date) - $script:StartTime).TotalMinutes, $nE, $nM) 'Green'
 Say ('Ouvrez : ' + (Join-Path $script:Out 'rapport.html'))
 Say 'ATTENTION : le dossier raw_SENSIBLE contient des cles/historiques : ne le transmettez a personne sans raison.' 'Yellow'
-if (-not $SansMenu) { Open-Rapport 'rapport.html'; Read-Host 'Entree pour fermer' | Out-Null }
+if (-not $SansMenu) { Open-Rapport 'rapport.html'; Wait-Fin -Menu:$Menu }

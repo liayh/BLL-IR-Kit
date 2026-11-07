@@ -35,6 +35,8 @@ RESULTATS
   FIN D'ANALYSE (collecte, audit poste, audit M365) : le rapport est produit, puis l'outil propose de
   l'enregistrer AVANT de l'ouvrir :  1 = archive .zip transmissible, 2 = dossier complet, Entree = rien.
   La copie est verifiee (empreintes SHA256) ; un ecart est signale en rouge.
+  Lance depuis BLL-IR-Kit.bat, l'outil propose ensuite : 1 (ou Entree) = autre test (retour au menu),
+  0 = fermer BLL IR-Kit.
 
 SECURITE : L'OUTIL N'OUVRE AUCUN ACCES DEPUIS L'EXTERIEUR
   - Aucun port en ecoute, aucune regle de pare-feu, aucun compte, aucun service d'acces distant n'est cree.

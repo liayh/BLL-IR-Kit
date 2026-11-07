@@ -1,4 +1,5 @@
-﻿<#
+﻿param([switch]$Menu)   # lance depuis BLL-IR-Kit.bat : proposer une autre action a la fin
+<#
  Installe la surveillance continue sur ce poste (copie dans C:\ProgramData\BLL\Surveillance + tache planifiee SYSTEM).
  A lancer sur un poste SAIN, en administrateur. Demande : nom du site, webhook (Teams/Slack/Discord/ntfy) et/ou mail.
 #>
@@ -84,4 +85,13 @@ Write-Host ''
 Write-Host 'Surveillance installee : controle toutes les 4 h et au demarrage.' -ForegroundColor Green
 Write-Host ('Dossier : ' + $dest + ' (journal_surveillance.log, autorises.txt, alerte.json)')
 Write-Host ('Apres un changement legitime (en administrateur) : powershell -ExecutionPolicy Bypass -File "' + $script + '" -Init')
+# lance depuis BLL-IR-Kit.bat (-Menu) : proposer une autre action ou fermer (code 99 = fermer l'outil)
+if ($Menu) {
+    Write-Host ''
+    Write-Host ' Que voulez-vous faire ?' -ForegroundColor Cyan
+    Write-Host '   1 (ou Entree) = autre test / autre action (retour au menu)'
+    Write-Host '   0             = fermer BLL IR-Kit'
+    if ("$(Read-Host ' Choix')".Trim() -eq '0') { exit 99 }
+    exit 0
+}
 Read-Host 'Entree pour fermer' | Out-Null

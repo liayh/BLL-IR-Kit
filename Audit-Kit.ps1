@@ -7,7 +7,8 @@ param(
     [ValidateSet('Durcissement', 'Correctifs', 'Sauvegardes', 'Partages', 'Reseau', 'Tout')][string[]]$Modules = @('Tout'),
     [switch]$Rapide,            # saute la recherche de mises a jour Windows (lente)
     [string]$Sortie,
-    [switch]$SansMenu
+    [switch]$SansMenu,
+    [switch]$Menu               # lance depuis BLL-IR-Kit.bat : proposer un autre test a la fin
 )
 $ErrorActionPreference = 'SilentlyContinue'
 $ProgressPreference = 'SilentlyContinue'
@@ -57,4 +58,4 @@ Invoke-Module 'Rapport' { Build-RapportAudit }
 Say ''
 Say ('TERMINE : score {0}/100 (note {1}) - {2} ecarts.' -f $script:Score, $script:Note, @($script:Checks | Where-Object { $_.Etat -eq 'ECART' }).Count) 'Green'
 Say ('Rapport : ' + (Join-Path $script:Out 'rapport_audit.html'))
-if (-not $SansMenu) { Open-Rapport 'rapport_audit.html'; Read-Host 'Entree pour fermer' | Out-Null }
+if (-not $SansMenu) { Open-Rapport 'rapport_audit.html'; Wait-Fin -Menu:$Menu }
