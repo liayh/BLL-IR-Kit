@@ -305,6 +305,118 @@ function Mod-ReseauLan {
 # ---------------------------------------------------------------------------
 function HtmlE { param($t) return [System.Net.WebUtility]::HtmlEncode([string]$t) }
 
+function MdE {
+    # texte sur une ligne, sans casser un tableau Markdown
+    param($t)
+    $s = (([string]$t) -replace '\r?\n', ' ') -replace '\|', '\|'
+    if ($s.Length -gt 1500) { $s = $s.Substring(0, 1500) + ' [...]' }
+    return $s
+}
+
+function Save-DossierIA {
+    # DOSSIER_POUR_IA.md : donnees de l'audit + consignes, a donner a Claude Code pour rediger un rapport detaille
+    param($Ok, $Ko, $Na, $Score, $Note)
+    $isM365 = ($script:Mode -eq 'M365')
+    $sujet = 'le poste Windows ' + $env:COMPUTERNAME
+    if ($isM365) { $sujet = 'le tenant Microsoft 365' }
+    $order = @{ 'ELEVE' = 0; 'MOYEN' = 1; 'FAIBLE' = 2 }
+    $L = New-Object System.Collections.Generic.List[string]
+    $L.Add('# Dossier d''audit de securite - ' + $sujet)
+    $L.Add('')
+    $L.Add('> Genere par BLL IR-Kit v' + $script:KitVersion + ' le ' + (U (Get-Date)) + ' UTC.')
+    $L.Add('> CONFIDENTIEL : contient des noms de poste, de comptes, de logiciels et l''etat de securite du client.')
+    $L.Add('> Ne le donnez qu''a un outil d''IA autorise par votre structure. Ne joignez jamais le dossier raw_SENSIBLE.')
+    $L.Add('')
+    $L.Add('## Mode d''emploi (pour le technicien)')
+    $L.Add('')
+    $L.Add('1. Copier ce dossier d''audit (ou l''archive _SANS_SENSIBLE.zip decompressee) sur votre poste.')
+    $L.Add('2. Ouvrir Claude Code dans ce dossier et taper :')
+    $L.Add('   `Lis DOSSIER_POUR_IA.md et redige le rapport detaille demande.`')
+    $L.Add('3. Relire le rapport produit avant de le remettre au client.')
+    $L.Add('')
+    $L.Add('## Consignes pour l''IA')
+    $L.Add('')
+    $L.Add('Tu es consultant en cybersecurite. Le client est une petite structure (pharmacie d''officine ou equivalent) qui traite des donnees de sante, sans service informatique interne.')
+    $L.Add('A partir UNIQUEMENT des donnees de ce dossier (ce fichier et les fichiers CSV/TXT listes en annexe, que tu peux lire), redige en francais correct (avec accents) le fichier `RAPPORT_DETAILLE.md`, puis, si possible, une version `RAPPORT_DETAILLE.docx` ou `.html` imprimable. Plan attendu :')
+    $L.Add('')
+    $L.Add('1. **Synthese pour le dirigeant** (une page, sans jargon) : niveau de risque global, les 3 a 5 risques majeurs, leurs consequences concretes (rancongiciel, fuite de donnees de sante, arret de l''activite, obligations RGPD).')
+    $L.Add('2. **Tableau de bord** : score, nombre d''ecarts par gravite et par categorie.')
+    $L.Add('3. **Plan d''action priorise** : Immediat (sous 7 jours), Court terme (sous 30 jours), Moyen terme (sous 90 jours). Pour chaque action : intervenant (titulaire, prestataire informatique, editeur), effort estime, risque reduit.')
+    $L.Add('4. **Detail de chaque ecart** : constat (valeur mesuree), pourquoi c''est un risque, scenario d''attaque realiste, correction pas a pas (interface graphique, puis commande PowerShell ou strategie de groupe quand c''est pertinent), verification apres correction, reference (ANSSI, CIS, Microsoft).')
+    $L.Add('5. **Controles non verifiables** : ce qu''il faut verifier manuellement et comment.')
+    $L.Add('6. **Points conformes** (liste courte) et **limites de l''audit** (audit en lecture seule a une date donnee, modules en erreur eventuels).')
+    $L.Add('')
+    $L.Add('Regles :')
+    $L.Add('- N''invente aucun constat, aucun chiffre, aucun nom : si une information manque, ecris "a verifier".')
+    $L.Add('- Distingue clairement ce qui est mesure de ce qui est suppose.')
+    $L.Add('- Les commandes de correction sont des propositions a valider par le technicien : ne les execute pas.')
+    $L.Add('- Le score est un indicateur de suivi pondere par gravite, pas une certification.')
+    $L.Add('- Si le score est signale comme peu representatif, explique-le dans la synthese.')
+    $L.Add('')
+    $L.Add('## Contexte')
+    $L.Add('')
+    $L.Add('- Type d''audit : ' + $(if ($isM365) { 'Microsoft 365 (lecture seule, via Microsoft Graph / Exchange Online)' } else { 'poste Windows (lecture seule, en administrateur)' }))
+    $L.Add('- Date : ' + (U (Get-Date)) + ' UTC')
+    if ($isM365) {
+        try { $mc = Get-MgContext; if ($mc) { $L.Add('- Tenant : ' + $mc.TenantId) } } catch { }
+    } else {
+        $L.Add('- Poste : ' + $env:COMPUTERNAME)
+        try { $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop; $L.Add('- Systeme : ' + $os.Caption + ' ' + $os.Version + ' (' + $os.OSArchitecture + ')') } catch { }
+        try {
+            $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
+            $L.Add('- Materiel : ' + $cs.Manufacturer + ' ' + $cs.Model)
+            if ($cs.PartOfDomain) { $L.Add('- Domaine : ' + $cs.Domain) } else { $L.Add('- Groupe de travail : ' + $cs.Workgroup + ' (pas de domaine Active Directory)') }
+        } catch { }
+        $mods = Get-Variable -Name sel -ValueOnly -ErrorAction SilentlyContinue
+        if ($mods) { $L.Add('- Modules audites : ' + (@($mods) -join ', ')) }
+    }
+    $L.Add(('- Score : {0}/100 (note {1}) - {2} conformes, {3} ecarts, {4} non verifiables' -f $Score, $Note, $Ok.Count, $Ko.Count, $Na.Count))
+    if ($script:ScoreWarn) { $L.Add('- ' + $script:ScoreWarn) }
+    $L.Add('')
+    $L.Add('## Ecarts constates (par gravite)')
+    $L.Add('')
+    if ($Ko.Count -eq 0) { $L.Add('Aucun ecart.') } else {
+        $L.Add('| Gravite | Categorie | Controle | Valeur mesuree | Recommandation de l''outil |')
+        $L.Add('|---|---|---|---|---|')
+        foreach ($k in ($Ko | Sort-Object @{ Expression = { $order[$_.Gravite] } }, Categorie)) {
+            $L.Add('| ' + $k.Gravite + ' | ' + (MdE $k.Categorie) + ' | ' + (MdE $k.Controle) + ' | ' + (MdE $k.Valeur) + ' | ' + (MdE $k.Recommandation) + ' |')
+        }
+    }
+    $L.Add('')
+    $L.Add('## Controles non verifiables')
+    $L.Add('')
+    if ($Na.Count -eq 0) { $L.Add('Aucun.') } else {
+        $L.Add('| Categorie | Controle | Detail | Recommandation de l''outil |')
+        $L.Add('|---|---|---|---|')
+        foreach ($c in ($Na | Sort-Object Categorie)) { $L.Add('| ' + (MdE $c.Categorie) + ' | ' + (MdE $c.Controle) + ' | ' + (MdE $c.Valeur) + ' | ' + (MdE $c.Recommandation) + ' |') }
+    }
+    $L.Add('')
+    $L.Add('## Controles conformes')
+    $L.Add('')
+    if ($Ok.Count -eq 0) { $L.Add('Aucun.') } else {
+        $L.Add('| Categorie | Controle | Valeur mesuree |')
+        $L.Add('|---|---|---|')
+        foreach ($c in ($Ok | Sort-Object Categorie)) { $L.Add('| ' + (MdE $c.Categorie) + ' | ' + (MdE $c.Controle) + ' | ' + (MdE $c.Valeur) + ' |') }
+    }
+    if ($script:Errors.Count -gt 0) {
+        $L.Add(''); $L.Add('## Modules en erreur (resultats partiels)'); $L.Add('')
+        foreach ($e in $script:Errors) { $L.Add('- ' + (MdE $e)) }
+    }
+    $L.Add('')
+    $L.Add('## Annexes (fichiers de ce dossier, separateur ;)')
+    $L.Add('')
+    $root = $script:Out.TrimEnd('\')
+    $files = @(Get-ChildItem -LiteralPath $root -Recurse -File -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.Extension -eq '.csv' -and $_.FullName -notmatch '\\raw(_SENSIBLE)?\\' } | Sort-Object FullName)
+    if ($files.Count -eq 0) { $L.Add('Aucun.') }
+    foreach ($fi in $files) {
+        $n = 0
+        try { $n = [Math]::Max(0, @(Get-Content -LiteralPath $fi.FullName -ErrorAction Stop).Count - 1) } catch { }
+        $L.Add('- `' + $fi.FullName.Substring($root.Length).TrimStart('\') + '` : ' + $n + ' ligne(s)')
+    }
+    [System.IO.File]::WriteAllText((Join-Path $script:Out 'DOSSIER_POUR_IA.md'), ($L.ToArray() -join "`r`n") + "`r`n", (New-Object System.Text.UTF8Encoding($false)))
+}
+
 function Build-RapportAudit {
     $ok = @($script:Checks | Where-Object { $_.Etat -eq 'OK' }); $ko = @($script:Checks | Where-Object { $_.Etat -eq 'ECART' }); $na = @($script:Checks | Where-Object { $_.Etat -eq 'N/A' })
     $wOk = 0; foreach ($c in $ok) { $wOk += $c.Poids }; $wKo = 0; foreach ($c in $ko) { $wKo += $c.Poids }
@@ -330,6 +442,7 @@ function Build-RapportAudit {
     $r.Add('')
     foreach ($k in $kos) { $r.Add(('[{0}] {1} - {2} : {3}' -f $k.Gravite, $k.Categorie, $k.Controle, $k.Valeur)); $r.Add('        -> ' + $k.Recommandation) }
     if ($script:Errors.Count -gt 0) { $r.Add(''); $r.Add('MODULES EN ERREUR :'); foreach ($e in $script:Errors) { $r.Add(' - ' + $e) } }
+    $r.Add(''); $r.Add('Rapport detaille : donner DOSSIER_POUR_IA.md (et ce dossier, sans raw_SENSIBLE) a Claude Code.')
     Save-Text $r.ToArray() 'RESUME_AUDIT.txt' ''
 
     $sb = New-Object System.Text.StringBuilder
@@ -346,6 +459,8 @@ function Build-RapportAudit {
     foreach ($c in ($script:Checks | Sort-Object Categorie, Etat)) { $cl = $c.Etat; if ($cl -eq 'ECART') { $cl = $c.Gravite }; if ($cl -eq 'N/A') { $cl = 'NA' }; [void]$sb.Append('<tr class="' + $cl + '"><td>' + $c.Etat + '</td><td>' + (HtmlE $c.Categorie) + '</td><td>' + (HtmlE $c.Controle) + '</td><td>' + (HtmlE $c.Valeur) + '</td></tr>') }
     [void]$sb.Append('</table>')
     if ($script:Errors.Count -gt 0) { [void]$sb.Append('<h2>Modules en erreur</h2><ul>'); foreach ($e in $script:Errors) { [void]$sb.Append('<li>' + (HtmlE $e) + '</li>') }; [void]$sb.Append('</ul>') }
+    [void]$sb.Append('<p><em>Rapport detaille : donner DOSSIER_POUR_IA.md (dossier de cet audit) a Claude Code.</em></p>')
     [void]$sb.Append('</body></html>')
     [System.IO.File]::WriteAllText((Join-Path $script:Out 'rapport_audit.html'), $sb.ToString(), (New-Object System.Text.UTF8Encoding($true)))
+    try { Save-DossierIA $ok $ko $na $score $note } catch { Say ('Dossier pour IA non cree : ' + $_.Exception.Message) 'Yellow' }
 }

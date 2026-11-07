@@ -181,5 +181,6 @@ Invoke-Module 'Rapport' { Build-RapportAudit }
 Disconnect-MgGraph | Out-Null
 Write-Host ''
 Write-Host ('TERMINE : score {0}/100 (note {1}). Rapport : {2}' -f $script:Score, $script:Note, (Join-Path $script:Out 'rapport_audit.html')) -ForegroundColor Green
+Write-Host ('Rapport detaille : donner ' + (Join-Path $script:Out 'DOSSIER_POUR_IA.md') + ' a Claude Code.') -ForegroundColor Cyan
 Open-Rapport 'rapport_audit.html'
 Wait-Fin -Menu:$Menu

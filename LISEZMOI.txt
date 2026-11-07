@@ -86,6 +86,11 @@ AUDITS ET SURVEILLANCE (v1.3)
    - Reseau local : decouverte des equipements, ports a risque (Telnet, FTP, VNC, RDP, bases de donnees), cameras/NVR,
      serveur DHCP pirate, UPnP et redirections de ports de la box. A lancer depuis un poste de l'officine.
    Option : Audit-Kit.ps1 -Modules Sauvegardes,Reseau -Rapide
+   RAPPORT DETAILLE : chaque audit (poste et M365) produit DOSSIER_POUR_IA.md : toutes les donnees de l'audit
+   + les consignes de redaction. Ouvrir Claude Code dans le dossier de l'audit et taper :
+      Lis DOSSIER_POUR_IA.md et redige le rapport detaille demande.
+   -> RAPPORT_DETAILLE.md (synthese dirigeant, plan d'action priorise, detail et correction de chaque ecart).
+   Fichier confidentiel (noms de poste, comptes, etat de securite) : ne jamais joindre raw_SENSIBLE.
 
 2) BLL-IR-Kit.bat choix 3 (ou Lancer-M365.bat)  - AUDIT MICROSOFT 365 (lecture seule, depuis VOTRE poste, connexion admin du tenant)
    MFA (Security Defaults / acces conditionnel / par utilisateur), administrateurs generaux, comptes inactifs et

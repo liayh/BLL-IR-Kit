@@ -58,4 +58,5 @@ Invoke-Module 'Rapport' { Build-RapportAudit }
 Say ''
 Say ('TERMINE : score {0}/100 (note {1}) - {2} ecarts.' -f $script:Score, $script:Note, @($script:Checks | Where-Object { $_.Etat -eq 'ECART' }).Count) 'Green'
 Say ('Rapport : ' + (Join-Path $script:Out 'rapport_audit.html'))
+Say ('Rapport detaille : donner ' + (Join-Path $script:Out 'DOSSIER_POUR_IA.md') + ' a Claude Code.') 'Cyan'
 if (-not $SansMenu) { Open-Rapport 'rapport_audit.html'; Wait-Fin -Menu:$Menu }
